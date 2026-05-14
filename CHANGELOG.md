@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-05-14
+
 ### Added
 - **`<active_agent name="…"/>` tag prepended to every child system prompt** ([#73](https://github.com/tintinweb/pi-subagents/pull/73) — thanks [@chris-lasher](https://github.com/chris-lasher)). `buildAgentPrompt` now emits `<active_agent name="${config.name}"/>` as the first line of the assembled prompt in both `replace` and `append` modes, before the env block. Downstream extensions (e.g. permission/policy systems) can parse it from inside the child session to resolve per-agent policy. The tag uses the agent's `config.name` verbatim — no escaping or normalization — and does not couple this extension to any specific downstream consumer; ignoring it is harmless.
 
