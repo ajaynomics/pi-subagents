@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`<active_agent name="…"/>` tag prepended to every child system prompt** ([#73](https://github.com/tintinweb/pi-subagents/pull/73) — thanks [@chris-lasher](https://github.com/chris-lasher)). `buildAgentPrompt` now emits `<active_agent name="${config.name}"/>` as the first line of the assembled prompt in both `replace` and `append` modes, before the env block. Downstream extensions (e.g. permission/policy systems) can parse it from inside the child session to resolve per-agent policy. The tag uses the agent's `config.name` verbatim — no escaping or normalization — and does not couple this extension to any specific downstream consumer; ignoring it is harmless.
+
 ### Changed
 - **Subagent sessions now get a stable, type-derived name with an id suffix for parallel spawns** ([#51](https://github.com/tintinweb/pi-subagents/pull/51) — thanks [@forcepushdev](https://github.com/forcepushdev)). `runAgent` calls `session.setSessionName(agentConfig?.name ?? type)`, and when the manager assigns an `agentId` (always, in production), the name is suffixed with an 8-char slice — e.g. `Explore#a1b2c3d4` — so concurrent spawns of the same agent type are distinguishable in the overlay instead of all collapsing onto the same bare name. Direct `runAgent` callers without an `agentId` (e.g. tests) get the bare name.
 
