@@ -12,14 +12,15 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -518,6 +519,17 @@ export default function (pi: ExtensionAPI) {
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
+  // ---- Scope models configuration ----
+  // When enabled, subagent model choices are validated against `enabledModels`
+  // from pi's settings — both global `<agentDir>/settings.json` and
+  // project-local `<cwd>/.pi/settings.json` (project overrides global).
+  // Off by default; opt-in via `/agents → Settings`. See docstring on
+  // SubagentsSettings.scopeModels for the hard-error vs warn-and-proceed
+  // policy and its rationale.
+  let scopeModelsEnabled = false;
+  function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
+  function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -609,6 +621,7 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setDefaultJoinMode,
       setSchedulingEnabled,
+      setScopeModels: setScopeModelsEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -857,6 +870,35 @@ Terse command-style prompts produce shallow, generic work.
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
+        }
+      }
+
+      // Scope validation: the effective resolved model is checked against the
+      // user's enabledModels list (read in `enabled-models.ts`).
+      //
+      // Design: scopeModels guards against *runtime* LLM choices, not user-level config.
+      //   - Caller-supplied out-of-scope → hard error (the orchestrator made an explicit
+      //     out-of-scope choice; surface it so it picks differently).
+      //   - Frontmatter-pinned or parent-inherited out-of-scope → warn but proceed (the
+      //     user authored/installed this agent or chose the parent's model; trust it).
+      // See SubagentsSettings.scopeModels docstring for the full policy.
+      if (isScopeModelsEnabled() && model) {
+        const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
+        if (allowed && !isModelInScope(model, allowed)) {
+          if (resolvedConfig.modelFromParams) {
+            const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
+            return textResult(
+              `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
+              `Allowed models (from enabledModels):\n${list}`,
+            );
+          }
+          // Frontmatter-pinned or parent-inherited: warn + proceed.
+          const agentLabel = customConfig?.displayName ?? subagentType;
+          const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
+          ctx.ui.notify(
+            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+            "warning",
+          );
         }
       }
 
@@ -1808,76 +1850,91 @@ ${systemPrompt}
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
+      scopeModels: isScopeModelsEnabled(),
     };
   }
 
-  async function showSettings(ctx: ExtensionCommandContext) {
-    const choice = await ctx.ui.select("Settings", [
-      `Max concurrency (current: ${manager.getMaxConcurrent()})`,
-      `Default max turns (current: ${getDefaultMaxTurns() ?? "unlimited"})`,
-      `Grace turns (current: ${getGraceTurns()})`,
-      `Join mode (current: ${getDefaultJoinMode()})`,
-      `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
-    ]);
-    if (!choice) return;
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns"]);
 
-    if (choice.startsWith("Max concurrency")) {
-      const val = await ctx.ui.input("Max concurrent background agents", String(manager.getMaxConcurrent()));
-      if (val) {
-        const n = parseInt(val, 10);
+  async function showSettings(ctx: ExtensionCommandContext) {
+    function buildItems(): SettingItem[] {
+      const mc = manager.getMaxConcurrent();
+      const dmt = getDefaultMaxTurns() ?? 0;
+      const gt = getGraceTurns();
+
+      return [
+        {
+          id: "maxConcurrent",
+          label: "Max concurrency",
+          description: "Max concurrent background agents (Enter to type)",
+          currentValue: String(mc),
+          values: [String(mc)],
+        },
+        {
+          id: "defaultMaxTurns",
+          label: "Default max turns",
+          description: "Default max turns before wrap-up (0 = unlimited, Enter to type)",
+          currentValue: String(dmt),
+          values: [String(dmt)],
+        },
+        {
+          id: "graceTurns",
+          label: "Grace turns",
+          description: "Grace turns after wrap-up steer (Enter to type)",
+          currentValue: String(gt),
+          values: [String(gt)],
+        },
+        {
+          id: "joinMode",
+          label: "Join mode",
+          description: "Default join mode for background agents",
+          currentValue: getDefaultJoinMode(),
+          values: ["smart", "async", "group"],
+        },
+        {
+          id: "schedulingEnabled",
+          label: "Scheduling",
+          description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
+          currentValue: isSchedulingEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "scopeModels",
+          label: "Scope models",
+          description: "Validate subagent models against scoped models (/scoped-models)",
+          currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+      ];
+    }
+
+    function applyValue(id: string, value: string) {
+      if (id === "maxConcurrent") {
+        const n = parseInt(value, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
           notifyApplied(ctx, `Max concurrency set to ${n}`);
-        } else {
-          ctx.ui.notify("Must be a positive integer.", "warning");
         }
-      }
-    } else if (choice.startsWith("Default max turns")) {
-      const val = await ctx.ui.input("Default max turns before wrap-up (0 = unlimited)", String(getDefaultMaxTurns() ?? 0));
-      if (val) {
-        const n = parseInt(val, 10);
+      } else if (id === "defaultMaxTurns") {
+        const n = parseInt(value, 10);
         if (n === 0) {
           setDefaultMaxTurns(undefined);
           notifyApplied(ctx, "Default max turns set to unlimited");
         } else if (n >= 1) {
           setDefaultMaxTurns(n);
           notifyApplied(ctx, `Default max turns set to ${n}`);
-        } else {
-          ctx.ui.notify("Must be 0 (unlimited) or a positive integer.", "warning");
         }
-      }
-    } else if (choice.startsWith("Grace turns")) {
-      const val = await ctx.ui.input("Grace turns after wrap-up steer", String(getGraceTurns()));
-      if (val) {
-        const n = parseInt(val, 10);
+      } else if (id === "graceTurns") {
+        const n = parseInt(value, 10);
         if (n >= 1) {
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
-        } else {
-          ctx.ui.notify("Must be a positive integer.", "warning");
         }
-      }
-    } else if (choice.startsWith("Join mode")) {
-      const val = await ctx.ui.select("Default join mode for background agents", [
-        "smart — auto-group 2+ agents in same turn (default)",
-        "async — always notify individually",
-        "group — always group background agents",
-      ]);
-      if (val) {
-        const mode = val.split(" ")[0] as JoinMode;
-        setDefaultJoinMode(mode);
-        notifyApplied(ctx, `Default join mode set to ${mode}`);
-      }
-    } else if (choice.startsWith("Scheduling")) {
-      const val = await ctx.ui.select(
-        "Schedule subagent feature",
-        [
-          "enabled — Agent tool accepts a `schedule` param; /agents → Scheduled jobs visible",
-          "disabled — `schedule` removed from Agent tool spec (no LLM-context cost); menu hidden",
-        ],
-      );
-      if (val) {
-        const enabled = val.startsWith("enabled");
+      } else if (id === "joinMode") {
+        setDefaultJoinMode(value as JoinMode);
+        notifyApplied(ctx, `Default join mode set to ${value}`);
+      } else if (id === "schedulingEnabled") {
+        const enabled = value === "on";
         if (enabled === isSchedulingEnabled()) {
           ctx.ui.notify(`Scheduling already ${enabled ? "enabled" : "disabled"}.`, "info");
         } else {
@@ -1888,6 +1945,84 @@ ${systemPrompt}
             `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
           );
         }
+      } else if (id === "scopeModels") {
+        const enabled = value === "on";
+        setScopeModelsEnabled(enabled);
+        notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      }
+    }
+
+    let list: SettingsList;
+    // Track current selection index directly (SettingsList doesn't expose it).
+    // Updated on arrow keys so Enter knows which field is selected immediately.
+    let currentIndex = 0;
+
+    const result = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
+      const items = buildItems();
+
+      list = new SettingsList(
+        items,
+        items.length + 2,
+        getSettingsListTheme(),
+        (id, newValue) => {
+          applyValue(id, newValue);
+        },
+        () => done(undefined as undefined),
+      );
+
+      const container = new Container();
+      container.addChild(new Text("⚙  Subagent Settings", 0, 0));
+      container.addChild(new Spacer(1));
+      container.addChild(list);
+
+      return {
+        render: (w: number) => container.render(w),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          // Track navigation so Enter knows the current field
+          if (matchesKey(data, "up")) {
+            currentIndex = Math.max(0, currentIndex - 1);
+          } else if (matchesKey(data, "down")) {
+            currentIndex = Math.min(items.length - 1, currentIndex + 1);
+          }
+
+          // Enter on numeric field → close and prompt for typed input
+          if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
+            done(items[currentIndex].id);
+            return;
+          }
+          list.handleInput?.(data);
+        },
+      };
+    });
+
+    // If a numeric field ID was returned, prompt for typed input
+    if (result && NUMERIC_IDS.has(result)) {
+      const current = result === "maxConcurrent"
+        ? String(manager.getMaxConcurrent())
+        : result === "defaultMaxTurns"
+          ? String(getDefaultMaxTurns() ?? 0)
+          : String(getGraceTurns());
+
+      const label = result === "maxConcurrent"
+        ? "Max concurrency (1+)"
+        : result === "defaultMaxTurns"
+          ? "Default max turns (0 = unlimited)"
+          : "Grace turns (1+)";
+
+      // Loop until user enters a valid integer or cancels (Esc / null).
+      // Silently trims whitespace; rejects non-numeric input by re-prompting.
+      let input: string | undefined = await ctx.ui.input(label, current);
+      while (input != null) {
+        const trimmed = input.trim();
+        const n = Number(trimmed);
+        if (trimmed !== "" && Number.isInteger(n)) {
+          applyValue(result, String(n));
+          await showSettings(ctx);
+          return;
+        }
+        // Invalid — re-prompt with the user's last entry so they can edit it
+        input = await ctx.ui.input(label, trimmed);
       }
     }
   }

@@ -26,6 +26,28 @@ export interface SubagentsSettings {
    * (next pi session); runtime menu/runtime-fire short-circuit is immediate.
    */
   schedulingEnabled?: boolean;
+  /**
+   * When true, the effective model of each subagent spawn is validated
+   * against `enabledModels` from pi's settings — both global
+   * (`<agentDir>/settings.json`) and project-local (`<cwd>/.pi/settings.json`),
+   * with project overriding global (mirrors pi's SettingsManager deep-merge).
+   *
+   * scopeModels guards against runtime LLM choices, not user-level config.
+   * Out-of-scope handling reflects this:
+   *   - Caller-supplied via `Agent({ model: "..." })` (only when frontmatter
+   *     has no `model:`, since frontmatter is authoritative): hard error
+   *     returned to the orchestrator, listing the allowed models. The LLM
+   *     made an explicit out-of-scope choice and gets explicit feedback.
+   *   - Frontmatter-pinned: warning toast + the pinned model runs. The
+   *     agent's author/installer chose this; trust it.
+   *   - Parent-inherited (neither caller nor frontmatter sets a model):
+   *     warning toast + parent's model runs. The user chose the parent's
+   *     model when starting the session; trust it.
+   *
+   * No-op when pi's `enabledModels` is empty or absent — nothing to validate
+   * against. Defaults to false: subagents may use any model.
+   */
+  scopeModels?: boolean;
 }
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -35,6 +57,7 @@ export interface SettingsAppliers {
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
   setSchedulingEnabled: (b: boolean) => void;
+  setScopeModels: (enabled: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -80,6 +103,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.schedulingEnabled === "boolean") {
     out.schedulingEnabled = r.schedulingEnabled;
+  }
+  if (typeof r.scopeModels === "boolean") {
+    out.scopeModels = r.scopeModels;
   }
   return out;
 }
@@ -136,6 +162,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
+  if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
 }
 
 /**
