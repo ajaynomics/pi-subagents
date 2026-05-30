@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-30
+
 > **Heads-up — orchestrator behavior may shift.** This release substantially rewrites the `Agent` tool description and the three default-agent descriptions (`general-purpose`, `Explore`, `Plan`) to mirror Claude Code's upstream wording. No API, schema, or tool-call shape changes — purely a prompt-engineering shift, but a load-bearing one:
 > - **Agent selection may drift.** The new agent descriptions carry richer positive ("Use it to …") and negative ("Do NOT use it for …") guidance plus search-breadth hints for `Explore` (`"quick"` / `"medium"` / `"very thorough"`). For ambiguous tasks where the orchestrator previously picked one default agent, it may now pick another — typically more correctly, but the choice may differ from prior releases.
 > - **Subagent briefings will skew longer and more contextual.** The restored upstream guardrails and the new `## Writing the prompt` section actively coach "smart colleague who just walked into the room"-style prompts. Expect more context, more constraint, more upfront framing in the `prompt:` field the orchestrator passes to subagents.
