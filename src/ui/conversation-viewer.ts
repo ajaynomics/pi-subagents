@@ -25,6 +25,8 @@ export class ConversationViewer implements Component {
   private unsubscribe: (() => void) | undefined;
   private lastInnerW = 0;
   private closed = false;
+  /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
+  private stopArmed = false;
 
   constructor(
     private tui: TUI,
@@ -33,6 +35,8 @@ export class ConversationViewer implements Component {
     private activity: AgentActivity | undefined,
     private theme: Theme,
     private done: (result: undefined) => void,
+    /** Abort the agent shown here. Omitted → no stop affordance (e.g. read-only history). */
+    private onStop?: () => void,
   ) {
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
@@ -46,6 +50,22 @@ export class ConversationViewer implements Component {
       this.done(undefined);
       return;
     }
+
+    // Stop/abort the agent (only while it can still be stopped). Two-press:
+    // first "x" arms, second confirms — any other key disarms.
+    if (matchesKey(data, "x")) {
+      if (this.isStoppable()) {
+        if (this.stopArmed) {
+          this.stopArmed = false;
+          this.onStop?.();
+        } else {
+          this.stopArmed = true;
+        }
+        this.tui.requestRender();
+      }
+      return;
+    }
+    if (this.stopArmed) this.stopArmed = false;
 
     const totalLines = this.buildContentLines(this.lastInnerW).length;
     const viewportHeight = this.viewportHeight();
@@ -141,12 +161,23 @@ export class ConversationViewer implements Component {
       ? "100%"
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+    const scrollHint = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+    // Stop hint goes first in the right group so it survives right-edge
+    // truncation on narrow terminals (the scroll hint is the expendable part).
+    const footerRight = this.isStoppable()
+      ? (this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop")) +
+        th.fg("dim", " · ") + scrollHint
+      : scrollHint;
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);
 
     return lines;
+  }
+
+  /** Stoppable only when a stop handler exists and the agent is still active. */
+  private isStoppable(): boolean {
+    return !!this.onStop && (this.record.status === "running" || this.record.status === "queued");
   }
 
   invalidate(): void { /* no cached state to clear */ }
