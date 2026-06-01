@@ -25,8 +25,20 @@ import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
+/**
+ * Tool names registered by THIS extension. Single source of truth so the
+ * registration sites (index.ts) and the subagent exclusion list below can't
+ * drift apart. These are our own tools, not pi built-ins, so they can't be
+ * derived from pi — but they only need defining once.
+ */
+export const SUBAGENT_TOOL_NAMES = {
+  AGENT: "Agent",
+  GET_RESULT: "get_subagent_result",
+  STEER: "steer_subagent",
+} as const;
+
 /** Names of tools registered by this extension that subagents must NOT inherit. */
-const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
+const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.

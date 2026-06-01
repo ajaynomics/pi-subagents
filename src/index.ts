@@ -16,7 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -651,7 +651,7 @@ export default function (pi: ExtensionAPI) {
     : "";
 
   pi.registerTool(defineTool({
-    name: "Agent",
+    name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
     description: `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1188,7 +1188,7 @@ Terse command-style prompts produce shallow, generic work.
   // ---- get_subagent_result tool ----
 
   pi.registerTool(defineTool({
-    name: "get_subagent_result",
+    name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
       "Check status and retrieve results from a background agent. Use the agent ID returned by Agent with run_in_background.",
@@ -1268,7 +1268,7 @@ Terse command-style prompts produce shallow, generic work.
   // ---- steer_subagent tool ----
 
   pi.registerTool(defineTool({
-    name: "steer_subagent",
+    name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
       "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +

@@ -299,4 +299,23 @@ describe("agent type registry", () => {
       expect(names).toHaveLength(0);
     });
   });
+
+  describe("BUILTIN_TOOL_NAMES", () => {
+    // BUILTIN_TOOL_NAMES is derived dynamically from pi's tool factories
+    // (createCodingTools + createReadOnlyTools). This guards against pi-mono
+    // dropping/renaming a built-in: the set must still contain at least these
+    // 7. It's a superset check ("at least") — pi adding a new built-in is fine
+    // and won't fail this test.
+    const EXPECTED = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+
+    it("contains at least the 7 known built-ins", () => {
+      for (const name of EXPECTED) {
+        expect(BUILTIN_TOOL_NAMES).toContain(name);
+      }
+    });
+
+    it("has no duplicate entries", () => {
+      expect(new Set(BUILTIN_TOOL_NAMES).size).toBe(BUILTIN_TOOL_NAMES.length);
+    });
+  });
 });
