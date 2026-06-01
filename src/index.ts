@@ -28,6 +28,7 @@ import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./o
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
+import { getStatusNote } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
@@ -115,20 +116,6 @@ function getStatusLabel(status: string, error?: string): string {
     case "steered": return "Wrapped up (turn limit)";
     case "stopped": return "Stopped";
     default: return "Done";
-  }
-}
-
-/**
- * Parenthetical status note appended to agent result text. Explicit about a
- * non-normal outcome so the parent agent can't mistake partial output for a
- * completed result. Empty string for a clean completion.
- */
-function getStatusNote(status: string): string {
-  switch (status) {
-    case "stopped": return " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";
-    case "aborted": return " (aborted — hit the turn limit before completion; output may be incomplete)";
-    case "steered": return " (wrapped up at the turn limit — output may be partial)";
-    default: return "";
   }
 }
 

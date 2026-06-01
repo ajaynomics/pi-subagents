@@ -447,6 +447,31 @@ describe("AgentManager — abort() state machine", () => {
     expect(manager.abort(id)).toBe(false);
     expect(manager.getRecord(id)?.status).toBe("completed");
   });
+
+  it("a user abort survives the agent settling — stays 'stopped', never 'completed'", async () => {
+    // Guards the `if (record.status !== "stopped")` check in the completion
+    // handler: after a user abort, runAgent's promise still settles (here with
+    // aborted:false, as a non-cooperative mock would), and must NOT flip the
+    // user-stopped status back to "completed" — otherwise the parent agent
+    // would read the partial output as a finished result.
+    manager = new AgentManager();
+    let resolveRun!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((res) => { resolveRun = res as (v: unknown) => void; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("stopped");
+
+    // The agent loop ends and the promise settles "normally".
+    resolveRun({ responseText: "partial output", session: mockSession(), aborted: false, steered: false });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");        // not overwritten to "completed"
+    expect(record.result).toBe("partial output"); // partial result still captured
+  });
 });
 
 // Regression for #44: ESC during a foreground Agent call must propagate to
