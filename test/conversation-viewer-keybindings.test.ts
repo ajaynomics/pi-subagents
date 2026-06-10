@@ -83,6 +83,16 @@ describe("viewer-keys", () => {
     }
   });
 
+  it("manager with no user overrides behaves like the hardcoded defaults", () => {
+    const keys = createViewerKeys(new KeybindingsManager(TUI_KEYBINDINGS, {}));
+    expect(keys.scrollUp(UP)).toBe(true);
+    expect(keys.scrollDown(DOWN)).toBe(true);
+    expect(keys.pageUp(PAGE_UP)).toBe(true);
+    expect(keys.pageDown(PAGE_DOWN)).toBe(true);
+    expect(keys.scrollUp(CTRL_P)).toBe(false);
+    expect(keys.scrollDown(CTRL_N)).toBe(false);
+  });
+
   it("respects rebinding that removes a default key", () => {
     const manager = new KeybindingsManager(TUI_KEYBINDINGS, {
       "tui.select.up": "ctrl+p",

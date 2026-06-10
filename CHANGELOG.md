@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`exclude_extensions:` agent frontmatter — extension denylist for subagents** ([#94](https://github.com/tintinweb/pi-subagents/issues/94) — thanks [@ramhaidar](https://github.com/ramhaidar)). Applied after the `extensions:` include set; exclude wins, including over `tools: ext:` selectors (an excluded extension never loads, so its `ext:` reference becomes the usual orphan warning). The key use case: `extensions: true` + `exclude_extensions: pi-notify` — all extensions except a noisy one, without hand-maintaining an allowlist. Plain canonical names only (case-insensitive); paths, `*`, and unmatched names fire `extension-error:…` warnings (warn-not-abort, as with `extensions:` mismatches); `extensions: false` + an exclude warns that the exclude has no effect. **Not a sandbox:** excluded extensions' factory code still executes once during loading — exclusion suppresses handler binding and tool registration, not load-time side effects. The negation syntax `extensions: ["*", "!name"]` was deliberately rejected: an unquoted `!name` is a YAML tag and silently mis-parses.
 
+### Fixed
+- **Conversation viewer honors custom `tui.select.*` keybindings** ([#99](https://github.com/tintinweb/pi-subagents/issues/99) — thanks [@owenniles](https://github.com/owenniles)). The viewer hardcoded its scroll keys and discarded the `KeybindingsManager` pi injects into `ctx.ui.custom()`, so user bindings (e.g. emacs-style `ctrl+p`/`ctrl+n` on `tui.select.up`/`down`) worked in pi core selectors but not here. Scrolling now resolves through `tui.select.up`/`down`/`pageUp`/`pageDown`; the viewer-specific `k`/`j` and `shift+arrow` aliases still work alongside, and behavior without custom bindings is unchanged (the `tui.select.*` defaults are the previously hardcoded keys).
+
 ## [0.10.1] - 2026-06-10
 
 ### Added
