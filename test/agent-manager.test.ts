@@ -113,6 +113,72 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
   });
 });
 
+describe("AgentManager — spawnAndWait onSpawned + foreground output file wiring (#105)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("fields set on the record in onSpawned are visible when onSessionCreated fires", async () => {
+    // The load-bearing ordering guarantee: onSpawned fires synchronously inside
+    // spawn(), before runAgent's async onSessionCreated fires. index.ts relies on
+    // this to set record.outputFile so streamToOutputFile can pick it up.
+    manager = new AgentManager();
+    let capturedId: string | undefined;
+    let outputFileSeenAtSessionCreated: string | undefined;
+
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      // Yield one microtask to mirror real behavior: in production, onSessionCreated
+      // fires async (after network/session setup). onSpawned fires synchronously
+      // inside spawn() before runAgent's promise even starts. This await lets the
+      // remainder of startAgent (record.promise = …, onSpawned?.()) finish first.
+      await Promise.resolve();
+      opts.onSessionCreated?.(session);
+      outputFileSeenAtSessionCreated = capturedId
+        ? manager.getRecord(capturedId)?.outputFile
+        : undefined;
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, (fgId) => {
+      capturedId = fgId;
+      manager.getRecord(fgId)!.outputFile = "/fake/agent.jsonl";
+    });
+
+    expect(outputFileSeenAtSessionCreated).toBe("/fake/agent.jsonl");
+  });
+
+  it("onSpawned id matches the id returned by spawnAndWait", async () => {
+    manager = new AgentManager();
+    let spawnedId: string | undefined;
+    resolvedRun();
+
+    const { id } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, (fgId) => { spawnedId = fgId; });
+
+    expect(spawnedId).toBe(id);
+  });
+
+  it("onComplete fires on the error path with resultConsumed=true", async () => {
+    // The .then path is covered by the lifecycle-symmetry test above; this guards
+    // the .catch path which lacks try/catch around onComplete (a known asymmetry).
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => { completedRecord = r; });
+    vi.mocked(runAgent).mockRejectedValue(new Error("agent failed"));
+
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    });
+
+    expect(completedRecord).toBeDefined();
+    expect(completedRecord!.status).toBe("error");
+    expect(completedRecord!.resultConsumed).toBe(true);
+    expect(record).toBe(completedRecord);
+  });
+});
+
 describe("AgentManager — completion callbacks", () => {
   let manager: AgentManager;
 
