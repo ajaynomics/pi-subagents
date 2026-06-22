@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Foreground agent lifecycle completion and conversation logging** ([#105](https://github.com/tintinweb/pi-subagents/pull/105) — thanks [@benrhodeland](https://github.com/benrhodeland)). Two gaps closed: (1) **`onComplete` now fires for foreground agents**, emitting `subagents:completed` / `subagents:failed` lifecycle events and writing a `subagents:record` entry to the parent JSONL — previously only background agents emitted these, leaving cross-extension observers with an orphaned `subagents:started` event and no matching completion. `resultConsumed` is pre-set so the callback skips notifications (the result is returned inline); no change to the tool's return value. (2) **Foreground agent conversations are now streamed to `.output` files** (same `.pi/output/agent-<id>.jsonl` path as background agents) — inline subagent transcripts were previously permanently lost after `spawnAndWait` returned.
+
 ## [0.10.3] - 2026-06-12
 
 ### Added
