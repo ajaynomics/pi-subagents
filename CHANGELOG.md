@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-23
+
+### Added
+- **`persist_session` / `session_dir` agent frontmatter — persist a subagent as a real pi session** ([#111](https://github.com/tintinweb/pi-subagents/pull/111) — thanks [@codesoda](https://github.com/codesoda)). `persist_session: true` runs the subagent through `SessionManager.create(...)` instead of `SessionManager.inMemory(...)`, so its full transcript is written to pi's normal session location (`~/.pi/agent/sessions`) — inspectable and resumable after the fact, like a top-level session — rather than living in memory only. Useful for long-running, multi-round orchestrations (plan → review → implement → verify) where each subagent's conversation is worth keeping. `session_dir` optionally overrides where the persisted session is written (absolute, `~`, or agent-cwd-relative path); omitted, persistence follows pi's own precedence — `PI_CODING_AGENT_SESSION_DIR`, then the settings manager's `getSessionDir()`, then pi's default location. Both default off/unset, so existing agents are unchanged: the in-memory path is byte-identical to before, and the sidechain `.output` transcript is still written either way.
+
 ## [0.10.4] - 2026-06-23
 
 ### Fixed
