@@ -741,6 +741,53 @@ describe("AgentManager — abort() state machine", () => {
 // Regression for #44: ESC during a foreground Agent call must propagate to
 // the child. Pi delivers parent abort via AbortSignal; the manager wires the
 // signal's "abort" event to this.abort(id).
+describe("AgentManager — steer()", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("returns false for an unknown id", () => {
+    manager = new AgentManager();
+    expect(manager.steer("nope", "hi")).toBe(false);
+  });
+
+  it("delivers to a live session via session.steer()", () => {
+    manager = new AgentManager();
+    const steer = vi.fn(() => Promise.resolve());
+    let captured: ((s: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      captured = (opts as any)?.onSessionCreated;
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    // Simulate the session becoming ready.
+    captured?.({ steer, dispose: vi.fn() });
+
+    expect(manager.steer(id, "go left")).toBe(true);
+    expect(steer).toHaveBeenCalledWith("go left");
+  });
+
+  it("queues onto pendingSteers when the session isn't ready yet", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    record.session = undefined; // not ready
+
+    expect(manager.steer(id, "first")).toBe(true);
+    expect(manager.steer(id, "second")).toBe(true);
+    expect(record.pendingSteers).toEqual(["first", "second"]);
+  });
+
+  it("refuses to steer an agent that is no longer running", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: false });
+    await manager.getRecord(id)?.promise;
+    expect(manager.getRecord(id)?.status).toBe("completed");
+    expect(manager.steer(id, "too late")).toBe(false);
+  });
+});
+
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());

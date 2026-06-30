@@ -288,6 +288,7 @@ export class FleetList {
             if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
           },
           keybindings,
+          (message: string) => this.manager.steer(record.id, message),
         );
       },
       {

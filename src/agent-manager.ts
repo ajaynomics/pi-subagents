@@ -472,6 +472,27 @@ export class AgentManager {
     return record;
   }
 
+  /**
+   * Send a steering message to an agent from the UI (mirrors the steer_subagent
+   * tool). A live session delivers it now — it interrupts the agent after its
+   * current tool execution and appears as a user message. If the session isn't
+   * ready yet, the message is queued on `pendingSteers` and flushed when the
+   * session is created. Returns false if the agent can't accept steering
+   * (unknown id, or no longer running/queued).
+   */
+  steer(id: string, message: string): boolean {
+    const record = this.agents.get(id);
+    if (!record) return false;
+    if (record.status !== "running" && record.status !== "queued") return false;
+    if (record.session) {
+      record.session.steer(message).catch(() => {});
+    } else {
+      if (!record.pendingSteers) record.pendingSteers = [];
+      record.pendingSteers.push(message);
+    }
+    return true;
+  }
+
   getRecord(id: string): AgentRecord | undefined {
     return this.agents.get(id);
   }

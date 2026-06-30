@@ -1664,7 +1664,7 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings);
+        }, keybindings, (message: string) => manager.steer(record.id, message));
       },
       {
         overlay: true,
