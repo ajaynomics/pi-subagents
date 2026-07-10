@@ -53,9 +53,7 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
-  getModel,
   type Model,
-  registerFauxProvider,
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import {
@@ -67,6 +65,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { getModel, registerFauxProvider } from "./pi-ai.js";
 
 /** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
 const EXTENSION_PATH = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
@@ -278,7 +277,15 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     const modelId = options.live?.model ?? process.env.PI_MODEL;
     if (provider && modelId) {
       // getModel's overloads need the concrete provider literal; cast through.
-      model = (getModel as (p: string, m: string) => Model<string>)(provider, modelId);
+      // Since pi-ai 0.80 it is a static builtin-catalog lookup that returns
+      // undefined for unknown models — fail fast instead of letting
+      // createAgentSession silently substitute another model.
+      model = (getModel as (p: string, m: string) => Model<string> | undefined)(provider, modelId);
+      if (!model) {
+        throw new Error(
+          `runPrintMode (live mode): model "${provider}/${modelId}" not found in the builtin catalog`,
+        );
+      }
     }
     modelRegistry = undefined; // let createAgentSession build the real, auth-backed registry
   } else {
