@@ -59,18 +59,28 @@ export function extensionCanonicalName(extPath: string): string {
 /**
  * The unscoped, lowercased npm short name of the pi package that DECLARES
  * `extPath` as an extension entry — or undefined if the entry doesn't belong to
- * such a package. Walks up to the first `package.json` (the package boundary,
- * never crossing into a parent/monorepo package) and returns its `name` only
- * when its `pi.extensions` manifest actually lists this entry. That "declares
- * this entry" check is deliberate: our own test fixtures live under this repo,
- * whose root manifest declares `./src/index.ts` as `@tintinweb/pi-subagents`, so
- * a looser "nearest package.json name" rule would misattribute every co-located
- * file to `pi-subagents`.
+ * such a package.
+ *
+ * Climbs from the entry's directory looking for the package that owns it, and
+ * stays strictly within that package's tree by stopping at two structural
+ * boundaries — no hardcoded depth:
+ *   - the FIRST `package.json` found (the package root); the entry's own
+ *     manifest always sits at the root, above the entry, below any node_modules.
+ *   - a `node_modules` directory: a package never spans one (it's where OTHER
+ *     packages live), so reaching it means we've climbed out of the package —
+ *     stop before reading a consumer's or parent package's manifest.
+ * The name is then taken only when that root's `pi.extensions` manifest actually
+ * lists this entry. That "declares this entry" check is deliberate: our own test
+ * fixtures live under this repo, whose root manifest declares `./src/index.ts`
+ * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
+ * co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
   const entry = resolve(extPath);
   let dir = dirname(extPath);
   for (;;) {
+    // Climbing into node_modules means we've left the owning package's tree.
+    if (basename(dir) === "node_modules") return undefined;
     let pkg: { name?: unknown; pi?: { extensions?: unknown } };
     try {
       pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
@@ -80,7 +90,7 @@ function extensionPackageName(extPath: string): string | undefined {
       dir = parent;
       continue;
     }
-    // First package.json wins — it's the package boundary; decide here.
+    // First package.json wins — it's the package root; decide here.
     const entries = pkg.pi?.extensions;
     if (
       typeof pkg.name === "string" &&

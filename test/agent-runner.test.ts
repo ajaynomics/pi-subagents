@@ -864,6 +864,22 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
     const dir = pkgDir("just-a-project", undefined);
     expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src"]);
   });
+
+  it("does not climb past a node_modules boundary into a consumer's manifest", () => {
+    // A consumer that *declares* a dependency's entry must not lend its name to
+    // that dependency: the walk stops at node_modules before reading it.
+    const root = mkdtempSync(join(tmpdir(), "subagents-consumer-"));
+    tmpDirs.push(root);
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ name: "consumer", pi: { extensions: ["./node_modules/inner-ext/index.ts"] } }),
+    );
+    const inner = join(root, "node_modules", "inner-ext");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(join(inner, "index.ts"), "export default () => {};");
+    // Only the path-derived name — never "consumer".
+    expect(extensionCanonicalNames(join(inner, "index.ts"))).toEqual(["inner-ext"]);
+  });
 });
 
 describe("parseExtensionsSpec", () => {
