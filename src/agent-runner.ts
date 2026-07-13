@@ -247,6 +247,15 @@ export interface RunResult {
   aborted: boolean;
   /** True if the agent was steered to wrap up (hit soft turn limit) but finished in time. */
   steered: boolean;
+  /**
+   * The provider error of the run's FINAL assistant turn, when that turn
+   * failed (stopReason "error"). pi resolves an exhausted-retries failure
+   * normally instead of rejecting, so without this the manager would report
+   * such a run as completed — with an empty result, or worse, an earlier
+   * turn's text presented as the answer (#144). Undefined for any other stop
+   * reason: an empty-but-clean final turn is still a completion.
+   */
+  failure?: string;
 }
 
 /**
@@ -256,7 +265,10 @@ export interface RunResult {
 function collectResponseText(session: AgentSession) {
   let text = "";
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "message_start") {
+    // message_start also fires for user and toolResult messages — resetting on
+    // those would wipe assistant text already collected. Reset only when a new
+    // ASSISTANT message begins, so getText() is the last assistant message's text.
+    if (event.type === "message_start" && event.message.role === "assistant") {
       text = "";
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -266,15 +278,40 @@ function collectResponseText(session: AgentSession) {
   return { getText: () => text, unsubscribe };
 }
 
-/** Get the last assistant text from the completed session history. */
-function getLastAssistantText(session: AgentSession): string {
-  for (let i = session.messages.length - 1; i >= 0; i--) {
+/**
+ * Get the last non-empty assistant text produced during THIS invocation.
+ * `startIndex` is the message count captured before the prompt, so the walk-back
+ * never crosses into a previous turn: on a resume whose new turn failed empty,
+ * this returns "" instead of the prior turn's answer (#144). Defaults to 0 (a
+ * fresh spawn, where the whole history belongs to this run).
+ */
+function getLastAssistantText(session: AgentSession, startIndex = 0): string {
+  for (let i = session.messages.length - 1; i >= startIndex; i--) {
     const msg = session.messages[i];
     if (msg.role !== "assistant") continue;
     const text = extractText(msg.content).trim();
     if (text) return text;
   }
   return "";
+}
+
+/**
+ * Error message of THIS invocation's final assistant message, when that turn
+ * failed. Only stopReason "error" counts as failure — status derives from how
+ * the final turn STOPPED, never from whether it produced text: an empty clean
+ * stop is a completion, and a partial-text provider error is still a failure.
+ * Bounded by `startIndex` (like the text fallback) so a resume that produced no
+ * assistant message of its own never inherits a PRIOR turn's stop reason.
+ */
+function finalTurnError(session: AgentSession, startIndex = 0): string | undefined {
+  for (let i = session.messages.length - 1; i >= startIndex; i--) {
+    const msg = session.messages[i];
+    if (msg.role !== "assistant") continue;
+    return msg.stopReason === "error"
+      ? ((msg as { errorMessage?: string }).errorMessage?.trim() || "provider error with no output")
+      : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -664,6 +701,9 @@ export async function runAgent(
     }
   }
 
+  // Boundary for the history fallback: only assistant text produced from here
+  // on counts as this run's output (a fresh session, so usually 0).
+  const startLen = session.messages.length;
   try {
     await session.prompt(effectivePrompt);
   } finally {
@@ -672,8 +712,8 @@ export async function runAgent(
     cleanupAbort();
   }
 
-  const responseText = collector.getText().trim() || getLastAssistantText(session);
-  return { responseText, session, aborted, steered: softLimitReached };
+  const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
+  return { responseText, session, aborted, steered: softLimitReached, failure: finalTurnError(session, startLen) };
 }
 
 /**
@@ -688,7 +728,11 @@ export async function resumeAgent(
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<string> {
+): Promise<{ text: string; failure?: string }> {
+  // Boundary for the history fallback: the session already holds prior turns,
+  // so only assistant text produced by THIS resume prompt counts as its output
+  // — a failed resume must not surface the previous turn's answer (#144).
+  const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
@@ -718,7 +762,10 @@ export async function resumeAgent(
     cleanupAbort();
   }
 
-  return collector.getText().trim() || getLastAssistantText(session);
+  return {
+    text: collector.getText().trim() || getLastAssistantText(session, startLen),
+    failure: finalTurnError(session, startLen),
+  };
 }
 
 /**

@@ -123,6 +123,16 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   return { state, callbacks };
 }
 
+/**
+ * Salvaged partial output of a failed run, as a labeled suffix for the error
+ * surfaces (or "" if the run produced nothing). `record.result` is bounded to
+ * the run's own turns, so this is never a stale earlier answer (#144).
+ */
+function partialOutputSuffix(record: AgentRecord): string {
+  const partial = record.result?.trim();
+  return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
+}
+
 /** Human-readable status label for agent completion. */
 function getStatusLabel(status: string, error?: string): string {
   switch (status) {
@@ -1133,8 +1143,13 @@ Terse command-style prompts produce shallow, generic work.
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
+        // A failed resume surfaces the error, plus any partial output THIS
+        // resume produced (never the previous turn's answer, #144).
+        if (record.status === "error") {
+          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
+        }
         return textResult(
-          record.result?.trim() || record.error?.trim() || "No output.",
+          record.result?.trim() || "No output.",
           buildDetails(detailBase, record),
         );
       }
@@ -1331,7 +1346,8 @@ Terse command-style prompts produce shallow, generic work.
         : "";
 
       if (record.status === "error") {
-        return textResult(`${fallbackNote}Agent failed: ${record.error}`, details);
+        // Error headline + any partial output the run produced before failing.
+        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -1407,7 +1423,7 @@ Terse command-style prompts produce shallow, generic work.
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
-        output += `Error: ${record.error}`;
+        output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
         output += record.result?.trim() || "No output.";
       }

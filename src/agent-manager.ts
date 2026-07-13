@@ -287,10 +287,20 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(({ responseText, session, aborted, steered }) => {
+      .then(({ responseText, session, aborted, steered, failure }) => {
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
-          record.status = aborted ? "aborted" : steered ? "steered" : "completed";
+          // Precedence: a hard abort keeps "aborted"; then a failed final turn
+          // (provider error that pi resolved instead of rejecting, #144) is an
+          // honest "error" — not a completion with an empty or stale result.
+          if (aborted) {
+            record.status = "aborted";
+          } else if (failure) {
+            record.status = "error";
+            record.error = failure;
+          } else {
+            record.status = steered ? "steered" : "completed";
+          }
         }
         record.result = responseText;
         record.session = session;
@@ -447,7 +457,7 @@ export class AgentManager {
     record.error = undefined;
 
     try {
-      const responseText = await resumeAgent(record.session, prompt, {
+      const { text, failure } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
         },
@@ -460,8 +470,11 @@ export class AgentManager {
         },
         signal,
       });
-      record.status = "completed";
-      record.result = responseText;
+      // Same contract as the spawn path (#144): a failed final turn is an
+      // error, not a completion — but the resumed text stays available.
+      record.status = failure ? "error" : "completed";
+      if (failure) record.error = failure;
+      record.result = text;
       record.completedAt = Date.now();
     } catch (err) {
       record.status = "error";
