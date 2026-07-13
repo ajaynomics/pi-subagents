@@ -316,6 +316,31 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     expect(result.responseText).toBe("truncated answ");
   });
 
+  it("flags a run whose final turn hit the token limit with no text (#144 residual)", async () => {
+    // stopReason "length" with empty content is a silent max-token death — it
+    // reproduces the #144 "completed with No output." symptom, so it must fail.
+    const session = sessionEnding({ role: "assistant", content: [], stopReason: "length" });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("run hit the output token limit before producing any text");
+  });
+
+  it("does NOT flag a length stop that produced text (truncated answer completes)", async () => {
+    const session = sessionEnding({
+      role: "assistant",
+      content: [{ type: "text", text: "truncated but useful answer" }],
+      stopReason: "length",
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBeUndefined();
+    expect(result.responseText).toBe("truncated but useful answer");
+  });
+
   it("does NOT flag an empty final turn that stopped cleanly (no false failures)", async () => {
     const session = sessionEnding(
       { role: "assistant", content: [{ type: "text", text: "did the work" }] },
