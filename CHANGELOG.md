@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.1] - 2026-07-14
 
 ### Added
 - **`max` thinking level is now advertised in the frontmatter/tool/wizard choices** ([#147](https://github.com/tintinweb/pi-subagents/issues/147) — thanks [@justin-ramirez-gametime](https://github.com/justin-ramirez-gametime)). pi 0.80 added `max` to its `ThinkingLevel`, and the extension already forwarded the value unchanged, but the Agent tool description, generated-agent template, `/agents` creation wizard, and README all stopped at `xhigh` — hiding a valid capability. Those four surfaces now come from one shared list so they can't drift behind pi again. Actual availability still depends on the host pi version and the selected model; pi clamps unsupported levels down.
