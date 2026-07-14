@@ -18,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
-import { registerRpcHandlers } from "./cross-extension-rpc.js";
+import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
@@ -480,6 +480,14 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
+  // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
+  // (a bound lifecycle event), not at factory time. pi runs every extension
+  // factory before the `extensions:` filter and only fires lifecycle events for
+  // survivors, so a child session that filtered pi-subagents out never reaches
+  // session_start — and must not advertise or answer RPC it can't service
+  // (currentCtx would stay undefined → spawn always "No active session"). Gating
+  // here makes a filtered session behave like an absent one (#142).
+  let rpcHandle: RpcHandle | undefined;
 
   // ---- Subagent scheduler ----
   // Session-scoped: store is constructed inside session_start once sessionId
@@ -503,9 +511,25 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
+  // This also wires the RPC handlers and broadcasts readiness — on the first
+  // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted(true);
+    // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
+    // fires once per activation, but a double-bind must not leak listeners.
+    if (!rpcHandle) {
+      rpcHandle = registerRpcHandlers({
+        events: pi.events,
+        pi,
+        getCtx: () => currentCtx,
+        manager,
+      });
+      // Broadcast readiness so extensions loaded alongside us can discover us.
+      // Emitting after all factories have run (rather than at factory time)
+      // also avoids the race where a consumer loaded after us misses the event.
+      pi.events.emit("subagents:ready", {});
+    }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
@@ -514,22 +538,13 @@ export default function (pi: ExtensionAPI) {
     scheduler.stop();
   });
 
-  const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
-    events: pi.events,
-    pi,
-    getCtx: () => currentCtx,
-    manager,
-  });
-
-  // Broadcast readiness so extensions loaded after us can discover us
-  pi.events.emit("subagents:ready", {});
-
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
-    unsubSpawnRpc();
-    unsubStopRpc();
-    unsubPingRpc();
+    rpcHandle?.unsubSpawn();
+    rpcHandle?.unsubStop();
+    rpcHandle?.unsubPing();
+    rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
