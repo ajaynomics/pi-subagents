@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-07-17
+
 ### Added
 - **`output_transcript` frontmatter + `outputTranscript` project setting — opt out of a subagent's `.output` transcript** ([#146](https://github.com/tintinweb/pi-subagents/pull/146) — thanks [@Thoughts-One](https://github.com/Thoughts-One)). Every subagent streams its full conversation to a per-subagent JSON-lines transcript under the OS temp dir (`<tmpdir>/pi-subagents-<uid>/…/<agent-id>.output`, owner-only `0700`, cleared on reboot); until now that write was unconditional. Set `output_transcript: false` on a custom agent to write no transcript file or path for it, or `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (a custom agent's frontmatter overrides the project default). Useful when run transcripts shouldn't sit on disk for backup or DLP tooling to ingest. Scope is deliberately narrow — it governs only the `.output` transcript, not the persisted pi session (`persist_session`), worktree commits (`isolation: worktree`), or memory files — so keeping a run fully off disk means setting those too. Default is unchanged: with neither flag set, transcripts are written exactly as before. The write decision is centralized on `record.outputFile`, so every downstream consumer (streaming, notifications, the transcript footer) keys off a single gate.
 
