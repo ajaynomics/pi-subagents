@@ -28,7 +28,7 @@ import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./o
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
-import { getStatusNote } from "./status-note.js";
+import { getForegroundOutcomeNote, getStatusNote } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
@@ -1429,7 +1429,7 @@ Terse command-style prompts produce shallow, generic work.
       const statsParts = [`${record.toolUses} tool uses`];
       if (tokenText) statsParts.push(tokenText);
       return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
+        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
         (record.result?.trim() || "No output."),
         details,
       );
