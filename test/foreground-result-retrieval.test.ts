@@ -176,10 +176,11 @@ describe("issue #174: foreground agent that hits max_turns", () => {
 
   it("survives a subagent session's OWN activation lifecycle (adversarial: cross-activation eviction)", async () => {
     // The one mechanism that could produce the reported symptom with no
-    // user-visible session change: subagent sessions re-activate this extension
-    // in the same process (session.bindExtensions in agent-runner.ts). If a
-    // child activation's session_start / session_shutdown reached the PARENT's
-    // manager, a finishing subagent would wipe the parent's records.
+    // user-visible session change: a second activation of this extension in the
+    // same process. Child sessions no longer reach it — activation returns early
+    // under `inChildSessionContext()` — but any other in-process activation still
+    // can, and if its session_start / session_shutdown reached the PARENT's
+    // manager, that activation ending would wipe the parent's records.
     const parent = makePi();
     subagentsExtension(parent.pi);
     await parent.lifecycle.get("session_start")?.({}, ctx());

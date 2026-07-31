@@ -14,7 +14,7 @@ vi.mock("../src/worktree.js", () => ({
   pruneWorktrees: vi.fn(),
 }));
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -161,6 +161,38 @@ describe("AgentManager — spawnAndWait onSpawned + foreground output file wirin
     expect(spawnedId).toBe(id);
   });
 
+  it("restores the shared onSpawned callback before awaiting the foreground run", async () => {
+    manager = new AgentManager();
+    let finishFirst: ((value: any) => void) | undefined;
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockResolvedValueOnce({
+        responseText: "second",
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+      });
+    const firstCallback = vi.fn();
+
+    const first = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", {
+      description: "first",
+    }, firstCallback);
+    const secondId = manager.spawn(mockPi, mockCtx, "general-purpose", "second", {
+      description: "second",
+      isBackground: true,
+    });
+
+    expect(firstCallback).toHaveBeenCalledTimes(1);
+    await manager.getRecord(secondId)!.promise;
+    finishFirst?.({
+      responseText: "first",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    await first;
+  });
+
   it("onComplete fires on the error path with resultConsumed=true", async () => {
     // The .then path is covered by the lifecycle-symmetry test above; this guards
     // the .catch path which lacks try/catch around onComplete (a known asymmetry).
@@ -176,6 +208,162 @@ describe("AgentManager — spawnAndWait onSpawned + foreground output file wirin
     expect(completedRecord!.status).toBe("error");
     expect(completedRecord!.resultConsumed).toBe(true);
     expect(record).toBe(completedRecord);
+  });
+});
+
+describe("AgentManager — nested runtime propagation", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("stores nesting metadata and passes the owning manager/runtime to runAgent", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "scout", "nested", {
+      description: "nested",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: "parent-1",
+      maxSubagentDepth: 3,
+      configCwd: "/trusted/config",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)).toEqual(expect.objectContaining({
+      depth: 2,
+      parentAgentId: "parent-1",
+      maxSubagentDepth: 3,
+    }));
+    expect(runAgent).toHaveBeenLastCalledWith(
+      mockCtx,
+      "scout",
+      "nested",
+      expect.objectContaining({
+        configCwd: "/trusted/config",
+        nestedRuntime: {
+          manager,
+          parentAgentId: id,
+          depth: 2,
+          maxSubagentDepth: 3,
+        },
+      }),
+    );
+  });
+
+  it("defaults top-level subagents to depth one", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "scout", "top", {
+      description: "top",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)?.depth).toBe(1);
+    expect(vi.mocked(runAgent).mock.lastCall?.[3].nestedRuntime).toEqual(expect.objectContaining({
+      parentAgentId: id,
+      depth: 1,
+    }));
+  });
+
+  it("starts a nested background child even when the concurrency pool is full", async () => {
+    // A parent holding the only slot and waiting on its own child would
+    // otherwise deadlock: the child can never be drained from the queue.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager = new AgentManager(undefined, 1);
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    // A second top-level background agent still queues — the pool is untouched.
+    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+      description: "sibling",
+      isBackground: true,
+    });
+
+    expect(manager.getRecord(childId)?.status).toBe("running");
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+  });
+
+  it("aborts owned children when the parent settles", async () => {
+    let finishParent: ((value: any) => void) | undefined;
+    // Children settle on abort, as a real run does when its signal fires.
+    const abortable = (_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(resolve => {
+        opts.signal?.addEventListener("abort", () =>
+          resolve({ responseText: "", session: mockSession(), aborted: true, steered: false }),
+        );
+      });
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise(resolve => { finishParent = resolve; }))
+      .mockImplementation(abortable as any);
+    manager = new AgentManager();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const runningChild = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    const grandchild = manager.spawn(mockPi, mockCtx, "scout", "grandchild", {
+      description: "grandchild",
+      isBackground: true,
+      depth: 3,
+      parentAgentId: runningChild,
+    });
+
+    finishParent?.({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(parentId)!.promise;
+
+    expect(manager.getRecord(runningChild)?.status).toBe("stopped");
+    // The child's own settle path stops the generation below it.
+    await manager.getRecord(runningChild)!.promise;
+    expect(manager.getRecord(grandchild)?.status).toBe("stopped");
+  });
+
+  it("aborts children spawned during a resumed turn", async () => {
+    // The spawn settle path already ran, so only resume() can stop what the
+    // resumed turn launched — otherwise the child runs on, invisible.
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    manager = new AgentManager();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    await manager.getRecord(parentId)!.promise;
+
+    let childId = "";
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+      childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+        description: "child",
+        isBackground: true,
+        depth: 2,
+        parentAgentId: parentId,
+      });
+      return { text: "resumed" } as any;
+    });
+
+    await manager.resume(parentId, "keep going");
+
+    expect(manager.getRecord(childId)?.status).toBe("stopped");
   });
 });
 

@@ -109,6 +109,7 @@ max_turns: 30
 persist_session: true
 output_transcript: false
 session_dir: .seams/pi-sessions/seam-plan-reviewer
+allowed_subagents: scout, reviewer
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
@@ -130,6 +131,7 @@ You are a security auditor.`);
     expect(agent.persistSession).toBe(true);
     expect(agent.outputTranscript).toBe(false);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
+    expect(agent.allowedSubagents).toEqual(["scout", "reviewer"]);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
@@ -157,6 +159,7 @@ Just a prompt.`);
     expect(agent.persistSession).toBeUndefined();
     expect(agent.outputTranscript).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
+    expect(agent.allowedSubagents).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
@@ -174,6 +177,60 @@ Just a prompt.`);
     expect(agent.description).toBe("bare");
     expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
     expect(agent.systemPrompt).toBe("Just a system prompt, no frontmatter.");
+  });
+
+  it("parses allowed_subagents: off by default, `all` wildcard, csv restriction", () => {
+    writeAgent("omitted", `---
+---
+Off.`);
+    writeAgent("unrestricted", `---
+allowed_subagents: all
+---
+Unrestricted.`);
+    writeAgent("wildcard", `---
+allowed_subagents: "*"
+---
+Unrestricted.`);
+    writeAgent("mixed-case", `---
+allowed_subagents: scout, ALL
+---
+Unrestricted.`);
+    writeAgent("none", `---
+allowed_subagents: none
+---
+Off.`);
+    writeAgent("blank", `---
+allowed_subagents:
+---
+Off.`);
+    writeAgent("restricted", `---
+allowed_subagents: scout, reviewer
+---
+Restricted.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("omitted")!.allowedSubagents).toBeUndefined();
+    expect(result.get("unrestricted")!.allowedSubagents).toBe("all");
+    expect(result.get("wildcard")!.allowedSubagents).toBe("all");
+    expect(result.get("mixed-case")!.allowedSubagents).toBe("all");
+    expect(result.get("none")!.allowedSubagents).toBeUndefined();
+    expect(result.get("blank")!.allowedSubagents).toBeUndefined();
+    expect(result.get("restricted")!.allowedSubagents).toEqual(["scout", "reviewer"]);
+  });
+
+  it("accepts booleans like extensions:/skills: do, instead of a type named \"true\"", () => {
+    writeAgent("bool-on", `---
+allowed_subagents: true
+---
+On.`);
+    writeAgent("bool-off", `---
+allowed_subagents: false
+---
+Off.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("bool-on")!.allowedSubagents).toBe("all");
+    expect(result.get("bool-off")!.allowedSubagents).toBeUndefined();
   });
 
   it("handles tools: none → empty array", () => {

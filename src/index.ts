@@ -15,20 +15,23 @@ import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { abortable } from "./abortable.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
+import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
+import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
-import { getForegroundOutcomeNote, getStatusNote } from "./status-note.js";
+import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
@@ -56,39 +59,6 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
-}
-
-/** Await a promise until it settles or the caller cancels, without aborting the underlying work. */
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
-
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => signal.removeEventListener("abort", onAbort);
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(signal.reason);
-    };
-
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(value);
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      },
-    );
-  });
 }
 
 export function renderRunningAgentStatus(
@@ -164,16 +134,6 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
  * host pi version and the selected model — pi clamps unsupported levels down.
  */
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
-/**
- * Salvaged partial output of a failed run, as a labeled suffix for the error
- * surfaces (or "" if the run produced nothing). `record.result` is bounded to
- * the run's own turns, so this is never a stale earlier answer (#144).
- */
-function partialOutputSuffix(record: AgentRecord): string {
-  const partial = record.result?.trim();
-  return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
-}
 
 /** Human-readable status label for agent completion. */
 function getStatusLabel(status: string, error?: string): string {
@@ -264,6 +224,11 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
 }
 
 export default function (pi: ExtensionAPI) {
+  // Child AgentSessions load normal extensions. Re-entering this extension there
+  // would create another manager and leak handlers. Nested orchestration is
+  // injected as scoped custom tools by the existing manager instead.
+  if (inChildSessionContext()) return;
+
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
@@ -434,6 +399,10 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: route through group join or send individual nudge
   const manager = new AgentManager((record) => {
+    // Nested children report only through their owning parent's scoped tools.
+    // Keep them out of top-level lifecycle, transcript, notification, and UI channels.
+    if (record.parentAgentId) return;
+
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -474,6 +443,7 @@ export default function (pi: ExtensionAPI) {
     // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
+    if (record.parentAgentId) return;
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -481,6 +451,7 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
     });
   }, (record, info) => {
+    if (record.parentAgentId) return;
     // Emit compacted event when agent's session compacts (preserves count on record).
     pi.events.emit("subagents:compacted", {
       id: record.id,
@@ -502,12 +473,27 @@ export default function (pi: ExtensionAPI) {
   // session's entry. The first activation (the root session) wins; child
   // activations leave it alone.
   const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+  // Process-external callers may supply arbitrary options. Nested ownership and
+  // config-root metadata are internal capabilities issued only by scoped tools.
+  const spawnTopLevel = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+    const safeOptions = { ...(options ?? {}) };
+    delete safeOptions.parentAgentId;
+    delete safeOptions.depth;
+    delete safeOptions.maxSubagentDepth;
+    delete safeOptions.configCwd;
+    // Also internal: it names a transcript directory, so a forged value would
+    // be a path-traversal primitive.
+    delete safeOptions.rootSessionId;
+    return manager.spawn(piRef, ctxRef, type, prompt, safeOptions);
+  };
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
+    spawn: spawnTopLevel,
+    getRecord: (id: string) => {
+      const record = manager.getRecord(id);
+      return record?.parentAgentId ? undefined : record;
+    },
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
@@ -559,7 +545,13 @@ export default function (pi: ExtensionAPI) {
         events: pi.events,
         pi,
         getCtx: () => currentCtx,
-        manager,
+        manager: {
+          spawn: spawnTopLevel,
+          abort: (id) => {
+            const record = manager.getRecord(id);
+            return !record?.parentAgentId && manager.abort(id);
+          },
+        },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
@@ -611,12 +603,10 @@ export default function (pi: ExtensionAPI) {
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
-  // Project/global default for writing the subagent .output transcript. A custom
-  // agent's `output_transcript` frontmatter overrides this per spawn; when the
-  // frontmatter is silent, this default applies. Read live at spawn time.
-  let outputTranscriptDefault = true;
-  function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
-  function setOutputTranscript(b: boolean): void { outputTranscriptDefault = b; }
+  // Project/global default for writing the subagent .output transcript lives in
+  // output-file.ts (both spawn paths read it). A custom agent's
+  // `output_transcript` frontmatter overrides it per spawn; when the frontmatter
+  // is silent, this default applies. Read live at spawn time.
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -632,17 +622,6 @@ export default function (pi: ExtensionAPI) {
   let schedulingEnabled = true;
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
-
-  // ---- Scope models configuration ----
-  // When enabled, subagent model choices are validated against `enabledModels`
-  // from pi's settings — both global `<agentDir>/settings.json` and
-  // project-local `<cwd>/.pi/settings.json` (project overrides global).
-  // Off by default; opt-in via `/agents → Settings`. See docstring on
-  // SubagentsSettings.scopeModels for the hard-error vs warn-and-proceed
-  // policy and its rationale.
-  let scopeModelsEnabled = false;
-  function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
-  function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
   // ---- Disable default agents configuration ----
   // When enabled, the three hardcoded default agents (general-purpose, Explore,
@@ -772,7 +751,8 @@ export default function (pi: ExtensionAPI) {
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setWidgetMode: setWidgetMode,
-      setOutputTranscript: setOutputTranscript,
+      setOutputTranscript: setOutputTranscriptDefault,
+      setMaxSubagentDepth: setMaxSubagentDepth,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1094,33 +1074,18 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // Scope validation: the effective resolved model is checked against the
-      // user's enabledModels list (read in `enabled-models.ts`).
-      //
-      // Design: scopeModels guards against *runtime* LLM choices, not user-level config.
-      //   - Caller-supplied out-of-scope → hard error (the orchestrator made an explicit
-      //     out-of-scope choice; surface it so it picks differently).
-      //   - Frontmatter-pinned or parent-inherited out-of-scope → warn but proceed (the
-      //     user authored/installed this agent or chose the parent's model; trust it).
-      // See SubagentsSettings.scopeModels docstring for the full policy.
-      if (isScopeModelsEnabled() && model) {
-        const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
-        if (allowed && !isModelInScope(model, allowed)) {
-          if (resolvedConfig.modelFromParams) {
-            const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
-            return textResult(
-              `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
-              `Allowed models (from enabledModels):\n${list}`,
-            );
-          }
-          // Frontmatter-pinned or parent-inherited: warn + proceed.
-          const agentLabel = customConfig?.displayName ?? subagentType;
-          const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
-          ctx.ui.notify(
-            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
-            "warning",
-          );
-        }
-      }
+      // user's enabledModels list. Policy (hard error vs warn-and-proceed) lives
+      // in model-scope.ts so the nested delegation tools apply the same rule.
+      const scopeVerdict = checkModelScope({
+        model,
+        cwd: ctx.cwd,
+        modelRegistry: ctx.modelRegistry,
+        callerSupplied: resolvedConfig.modelFromParams,
+        agentLabel: customConfig?.displayName ?? subagentType,
+        modelInput: resolvedConfig.modelInput,
+      });
+      if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
+      if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
@@ -1212,7 +1177,7 @@ Terse command-style prompts produce shallow, generic work.
       // Resume existing agent
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
-        if (!existing) {
+        if (!existing || existing.parentAgentId) {
           return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }
         if (!existing.session) {
@@ -1261,6 +1226,7 @@ Terse command-style prompts produce shallow, generic work.
             isBackground: true,
             isolation,
             invocation: agentInvocation,
+            rootSessionId: ctx.sessionManager.getSessionId(),
             ...bgCallbacks,
           });
         } catch (err) {
@@ -1387,6 +1353,7 @@ Terse command-style prompts produce shallow, generic work.
           isolation,
           invocation: agentInvocation,
           signal,
+          rootSessionId: ctx.sessionManager.getSessionId(),
           ...fgCallbacks,
         }, (fgAgentId) => {
           // onSpawned: called synchronously after spawn, before onSessionCreated fires.
@@ -1461,7 +1428,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.parentAgentId) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
@@ -1540,7 +1507,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.parentAgentId) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
       if (record.status !== "running") {
@@ -1617,7 +1584,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter(a => !a.parentAgentId);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -1738,7 +1705,7 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter(a => !a.parentAgentId);
     if (agents.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
@@ -1878,6 +1845,9 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.model) fmFields.push(`model: ${cfg.model}`);
     if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
     if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
+    if (cfg.allowedSubagents !== undefined) {
+      fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
+    }
     fmFields.push(`prompt_mode: ${cfg.promptMode}`);
     if (cfg.extensions === false) fmFields.push("extensions: false");
     else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
@@ -2150,16 +2120,18 @@ ${systemPrompt}
       fleetView: isFleetViewEnabled(),
       widgetMode: getWidgetMode(),
       outputTranscript: getOutputTranscriptDefault(),
+      maxSubagentDepth: getMaxSubagentDepth(),
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
+      const msd = getMaxSubagentDepth();
 
       return [
         {
@@ -2182,6 +2154,13 @@ ${systemPrompt}
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
+        },
+        {
+          id: "maxSubagentDepth",
+          label: "Nested depth",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
+          currentValue: String(msd),
+          values: [String(msd)],
         },
         {
           id: "joinMode",
@@ -2264,6 +2243,17 @@ ${systemPrompt}
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
         }
+      } else if (id === "maxSubagentDepth") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          setMaxSubagentDepth(n);
+          notifyApplied(
+            ctx,
+            n <= 1
+              ? "Nested delegation disabled"
+              : `Nested depth set to ${n}. Applies to agents started from now on.`,
+          );
+        }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
         notifyApplied(ctx, `Default join mode set to ${value}`);
@@ -2289,7 +2279,7 @@ ${systemPrompt}
         notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
-        setOutputTranscript(enabled);
+        setOutputTranscriptDefault(enabled);
         notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
@@ -2354,13 +2344,17 @@ ${systemPrompt}
         ? String(manager.getMaxConcurrent())
         : result === "defaultMaxTurns"
           ? String(getDefaultMaxTurns() ?? 0)
-          : String(getGraceTurns());
+          : result === "maxSubagentDepth"
+            ? String(getMaxSubagentDepth())
+            : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
         ? "Max concurrency (1+)"
         : result === "defaultMaxTurns"
           ? "Default max turns (0 = unlimited)"
-          : "Grace turns (1+)";
+          : result === "maxSubagentDepth"
+            ? "Nested depth (0/1 = nesting off)"
+            : "Grace turns (1+)";
 
       // Loop until user enters a valid integer or cancels (Esc / null).
       // Silently trims whitespace; rejects non-numeric input by re-prompting.
