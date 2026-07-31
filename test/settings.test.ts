@@ -222,6 +222,36 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
     });
 
+    it("accepts `none` and `false` as the disabled fallback, nothing else", () => {
+      // Only the boolean needs an alias: it would otherwise be dropped, leaving
+      // the PERMISSIVE default while the author believed strict was on. Every
+      // string stays an agent name, so a mistaken "off" fails loudly at dispatch
+      // instead of meaning one thing here and another in the resolver.
+      for (const spelling of ["none", "NONE", " none ", false]) {
+        writeProject({ fallbackSubagent: spelling });
+        expect(loadSettings(projectDir).fallbackSubagent?.toLowerCase()).toBe("none");
+      }
+      writeProject({ fallbackSubagent: "off" });
+      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "off" });
+    });
+
+    it("drops values that aren't a string or `false`, without coercing them", () => {
+      // String(["none"]) is "none" — coercing would silently enable strict mode.
+      for (const junk of [["none"], null, 42, true, {}]) {
+        writeProject({ fallbackSubagent: junk });
+        expect(loadSettings(projectDir)).toEqual({});
+      }
+    });
+
+    it("keeps a named fallback agent and drops non-strings", () => {
+      writeProject({ fallbackSubagent: "  my-router  " });
+      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
+      writeProject({ fallbackSubagent: 42 });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ fallbackSubagent: "   " });
+      expect(loadSettings(projectDir)).toEqual({});
+    });
+
     it("drops invalid defaultJoinMode values", () => {
       writeProject({ defaultJoinMode: "invalid" });
       expect(loadSettings(projectDir)).toEqual({});
@@ -389,6 +419,7 @@ describe("settings persistence", () => {
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 
@@ -402,6 +433,13 @@ describe("settings persistence", () => {
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
+    });
+
+    it("applies fallbackSubagent through to the registry", () => {
+      // Without this, deleting the applySettings line for this field leaves the
+      // whole suite green while `subagents.json` silently stops working.
+      applySettings({ fallbackSubagent: "none" }, appliers);
+      expect(appliers.setFallbackSubagent).toHaveBeenCalledWith("none");
     });
 
     it("applies only the fields that are present", () => {
@@ -539,6 +577,7 @@ describe("settings persistence", () => {
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 

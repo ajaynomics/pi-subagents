@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { NO_FALLBACK } from "./agent-types.js";
 import type { JoinMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -101,6 +102,21 @@ export interface SubagentsSettings {
    * change applies to agents started after it.
    */
   maxSubagentDepth?: number;
+  /**
+   * Agent type substituted when a caller-supplied `subagent_type` doesn't
+   * resolve to exactly one enabled agent (unknown, disabled, or ambiguous by
+   * case). Omitted keeps the historical `general-purpose` fallback; a type name
+   * routes those calls to that agent instead; `"none"` disables the fallback so
+   * dispatch fails closed with an error naming the available types.
+   *
+   * The boolean `false` is accepted as a spelling of `"none"`, because a boolean
+   * would otherwise be dropped as the wrong type and silently leave the
+   * PERMISSIVE default in place while the author believes strict dispatch is on
+   * — the wrong direction to fail for this setting. Every other value is an
+   * agent name, so a mistaken `"off"` fails loudly at dispatch rather than
+   * meaning one thing here and another in the resolver.
+   */
+  fallbackSubagent?: string;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -119,6 +135,7 @@ export interface SettingsAppliers {
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
+  setFallbackSubagent: (v: string | undefined) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -193,6 +210,16 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.outputTranscript === "boolean") {
     out.outputTranscript = r.outputTranscript;
   }
+  if (r.fallbackSubagent === false) {
+    // The only non-string spelling worth accepting: a boolean would otherwise be
+    // dropped, silently leaving the PERMISSIVE default in place. Every string is
+    // an agent name except the `none` sentinel, which the resolver recognizes —
+    // so a mistaken "off" fails loudly at dispatch instead of meaning something
+    // different here than it does there.
+    out.fallbackSubagent = NO_FALLBACK;
+  } else if (typeof r.fallbackSubagent === "string" && r.fallbackSubagent.trim()) {
+    out.fallbackSubagent = r.fallbackSubagent.trim();
+  }
   return out;
 }
 
@@ -247,6 +274,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
+  if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);

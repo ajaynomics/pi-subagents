@@ -12,7 +12,7 @@ import {
   buildAgentRegistry,
   getAgentConfigIn,
   getAvailableTypesIn,
-  isValidTypeIn,
+  resolveEnabledTypeIn,
   resolveTypeIn,
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -195,9 +195,16 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // Reloaded per call so new agent files are picked up without a restart.
       const registry = loadRegistry();
       const rawType = params.subagent_type;
-      const resolvedType = resolveTypeIn(registry, rawType);
-      if (!resolvedType || !isValidTypeIn(registry, resolvedType)) {
-        return textResult(`Unknown or disabled nested agent type: "${rawType}".`, true);
+      // Strict resolve, never the fallback policy: a project-level
+      // `fallbackSubagent` must not hand a nested caller an agent its allowlist
+      // never named. The list stays allowlist-filtered so a typo can't enumerate
+      // agents this parent may not reach.
+      const resolvedType = resolveEnabledTypeIn(registry, rawType);
+      if (resolvedType === undefined) {
+        return textResult(
+          `Unknown or disabled nested agent type: "${rawType}". Allowed: ${availableIn(registry).join(", ") || "none"}.`,
+          true,
+        );
       }
       const allowed = allowedTypesIn(registry);
       if (allowed !== undefined && !allowed.has(resolvedType)) {
