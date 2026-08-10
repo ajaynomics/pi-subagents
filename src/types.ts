@@ -70,6 +70,8 @@ export interface AgentConfig {
   enabled?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
+  /** Path of the .md it was loaded from. Unset for embedded defaults. */
+  sourcePath?: string;
 }
 
 export type JoinMode = 'async' | 'group' | 'smart';

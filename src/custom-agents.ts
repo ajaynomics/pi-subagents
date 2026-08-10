@@ -20,20 +20,23 @@ import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
  * authority; .agents/agents is an additional read location.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
  */
-export function loadCustomAgents(cwd: string): Map<string, AgentConfig> {
+export function loadCustomAgents(cwd: string, strict = false): Map<string, AgentConfig> {
   const globalDir = join(getAgentDir(), "agents");
   const workspaceProjectDir = join(cwd, ".agents", "agents");
   const projectDir = join(cwd, ".pi", "agents");
 
   const agents = new Map<string, AgentConfig>();
-  loadFromDir(globalDir, agents, "global");            // lowest priority
-  loadFromDir(workspaceProjectDir, agents, "project"); // shared workspace
-  loadFromDir(projectDir, agents, "project");          // highest priority (overwrites)
+  loadFromDir(globalDir, agents, "global", strict);            // lowest priority
+  loadFromDir(workspaceProjectDir, agents, "project", strict); // shared workspace
+  loadFromDir(projectDir, agents, "project", strict);          // highest priority (overwrites)
+
+  warnedLastLoad = warnedThisLoad;
+  warnedThisLoad = new Set();
   return agents;
 }
 
 /** Load agent configs from a directory into the map. */
-function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "project" | "global"): void {
+function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "project" | "global", strict: boolean): void {
   if (!existsSync(dir)) return;
 
   let files: string[];
@@ -46,14 +49,14 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
   for (const file of files) {
     const name = basename(file, ".md");
 
-    let content: string;
-    try {
-      content = readFileSync(join(dir, file), "utf-8");
-    } catch {
+    const path = join(dir, file);
+
+    const parsed = readAgentFile(path, strict);
+    if (!parsed) {
+      warnSkippedOverride(name, agents);
       continue;
     }
-
-    const { frontmatter: fm, body } = parseFrontmatter<Record<string, unknown>>(content);
+    const { frontmatter: fm, body } = parsed;
 
     const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
 
@@ -83,8 +86,60 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       isolation: fm.isolation === "worktree" ? "worktree" : undefined,
       enabled: fm.enabled !== false,  // default true; explicitly false disables
       source,
+      sourcePath: path,
     });
   }
+}
+
+/**
+ * Read and parse one agent file, or warn and return undefined for the caller to
+ * skip. One bad file must not take the whole extension down with it — an
+ * unparseable `.md` used to abort activation, so pi exited before the TUI.
+ *
+ * The path is as much of the fix as the recovery: a bare YAML error ("line 2,
+ * column 14") is unactionable when agents come from three directories at once,
+ * and the only other symptom is `Unknown agent type`, which reads like a typo.
+ *
+ * Under `strict` the same failure rethrows, still naming the path, so callers
+ * that opted into failing closed stop rather than run a substituted agent.
+ */
+function readAgentFile(path: string, strict: boolean): { frontmatter: Record<string, unknown>; body: string } | undefined {
+  try {
+    return parseFrontmatter<Record<string, unknown>>(readFileSync(path, "utf-8"));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    if (strict) throw new Error(`${path}: ${reason}`);
+    warnIfNew(`Skipping agent file ${path}: ${reason}`);
+    return undefined;
+  }
+}
+
+/**
+ * A skipped file that was overriding an already-loaded agent leaves the name
+ * pointing at a *different* file — its own prompt, model and tools. Nothing
+ * downstream can flag that: unlike an unknown type, the `Agent` call succeeds.
+ */
+function warnSkippedOverride(name: string, agents: Map<string, AgentConfig>): void {
+  const surviving = agents.get(name);
+  // Nothing shadowed, or what it shadowed is disabled: dispatch refuses the type
+  // either way (see resolveEnabledTypeIn), so there is no substitution to report.
+  if (!surviving?.sourcePath || surviving.enabled === false) return;
+  warnIfNew(`Agent "${name}" now loads from ${surviving.sourcePath} instead`);
+}
+
+let warnedLastLoad = new Set<string>();
+let warnedThisLoad = new Set<string>();
+
+/**
+ * Agents reload on activation and again on every `Agent` call, so an unchanged
+ * problem would re-warn all session — over a painted TUI, since pi does not
+ * redirect console output. Compare against the previous load rather than every
+ * load ever, so a file that is fixed and then broken again still reports.
+ */
+function warnIfNew(message: string): void {
+  warnedThisLoad.add(message);
+  if (warnedLastLoad.has(message)) return;
+  console.warn(`[pi-subagents] ${message}`);
 }
 
 // ---- Field parsers ----

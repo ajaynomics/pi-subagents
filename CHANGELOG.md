@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`strictAgentFiles` — fail startup on a broken agent file instead of skipping it**. Off by default. When on, an unreadable or unparseable `agents/*.md` aborts extension load and names the file, so a checked-in `.pi/agents/` can't silently fall through to a different agent. Startup only: mid-session reloads (one per `Agent` call) keep warning, since a bad edit shouldn't kill the session on an unrelated spawn. Settable in `subagents.json` or via `/agents → Settings → Strict agent files`.
+
+### Fixed
+- **One malformed agent file no longer takes pi down with it** ([#212](https://github.com/tintinweb/pi-subagents/issues/212) — thanks [@daromaj](https://github.com/daromaj)). A YAML error in any discovered `agents/*.md` aborted extension activation: pi exited 1 before the TUI, naming no file. Unreadable and unparseable files are now skipped, with a warning naming the file and the error. If the skipped file was overriding a same-named agent, a second line names the file that loads in its place.
+
 ## [0.15.0] - 2026-08-10
 
 ### Added

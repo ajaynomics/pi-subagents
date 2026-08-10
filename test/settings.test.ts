@@ -275,6 +275,20 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({ scopeModels: false });
     });
 
+    it("accepts strictAgentFiles boolean (true and false)", () => {
+      writeProject({ strictAgentFiles: true });
+      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: true });
+      writeProject({ strictAgentFiles: false });
+      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: false });
+    });
+
+    it("drops non-boolean strictAgentFiles", () => {
+      writeProject({ strictAgentFiles: "yes" });
+      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+      writeProject({ strictAgentFiles: 1 });
+      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+    });
+
     it("drops non-boolean scopeModels", () => {
       writeProject({ scopeModels: "yes" });
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
@@ -413,6 +427,7 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
@@ -475,10 +490,18 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
+      expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
       expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+    });
+
+    it("applies strictAgentFiles; skips it when absent", () => {
+      applySettings({ strictAgentFiles: true }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(true);
+      applySettings({}, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledTimes(1);
     });
 
     it("applies widgetMode; skips it when absent", () => {
@@ -571,6 +594,7 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
