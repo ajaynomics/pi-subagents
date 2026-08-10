@@ -137,8 +137,15 @@ export interface RunPrintModeOptions {
    * neither this nor `PI_PROVIDER`+`PI_MODEL` is set, the model is left for pi to
    * resolve from your local config (settings default → first authed model) — i.e.
    * it picks up whatever your `pi` install is logged into, no env required.
+   *
+   * `false` pins the run faux even under `PI_E2E_LIVE=1`. A suite whose whole
+   * point is a scripted response — a provider error with no content, a
+   * three-level delegation chain — has nothing to gain from a real model and
+   * cannot assert anything once one answers instead. Without this, running the
+   * documented pre-publish smoke turns those suites red on a healthy tree,
+   * which is worse than not running them: it hides a real regression in noise.
    */
-  live?: { provider: string; model: string };
+  live?: { provider: string; model: string } | false;
 }
 
 export interface PrintModeRun {
@@ -235,6 +242,9 @@ const DEFAULT_SYSTEM_PROMPT =
   "You are a headless orchestrator. Use the Agent tool to delegate, then report the result.";
 
 function isLive(options: RunPrintModeOptions): boolean {
+  // An explicit `false` wins over the env var — the env var is a blanket switch,
+  // and a suite that pins itself faux is stating something the switch can't know.
+  if (options.live === false) return false;
   return Boolean(options.live) || /^(1|true|yes)$/i.test(process.env.PI_E2E_LIVE ?? "");
 }
 
@@ -273,8 +283,11 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     // `model` undefined: createAgentSession then calls findInitialModel() against
     // the real, auth-backed registry + your local settings default — i.e. it
     // picks up whatever your `pi` install is logged into, no env needed.
-    const provider = options.live?.provider ?? process.env.PI_PROVIDER;
-    const modelId = options.live?.model ?? process.env.PI_MODEL;
+    // `live: false` never reaches here (isLive returned false), but narrow it
+    // away rather than asserting: the pin is a plain option, not a type-level fact.
+    const pin = options.live || undefined;
+    const provider = pin?.provider ?? process.env.PI_PROVIDER;
+    const modelId = pin?.model ?? process.env.PI_MODEL;
     if (provider && modelId) {
       // getModel's overloads need the concrete provider literal; cast through.
       // Since pi-ai 0.80 it is a static builtin-catalog lookup that returns

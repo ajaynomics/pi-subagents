@@ -341,8 +341,14 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       const transcript = conversationText(run.parentSession);
       expect(transcript).toMatch(/FG_OK/i);
       expect(transcript).toMatch(/BG_OK/i);
-      // The agent ran the whole script to completion and self-reported.
-      expect(run.responseText).toMatch(/SELF-SMOKE COMPLETE/i);
+      // The agent ran the whole script to completion and self-reported. Checked
+      // against the transcript, not `responseText`: step 2's background agent
+      // completes asynchronously, so its completion nudge can land AFTER the
+      // final report and draw one more turn out of the model ("Acknowledged, all
+      // three steps PASS"). The report is then the second-to-last message and a
+      // last-message assertion fails a run that did everything right.
+      expect(transcript).toMatch(/SELF-SMOKE COMPLETE/i);
+      expect(run.responseText.length).toBeGreaterThan(0);
     },
     SELF_SMOKE_VITEST_TIMEOUT,
   );
