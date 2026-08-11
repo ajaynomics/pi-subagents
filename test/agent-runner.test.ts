@@ -242,6 +242,18 @@ describe("agent-runner final output capture", () => {
     }));
   });
 
+  it("forwards worktreeBase to the prompt builder, and omits it otherwise", async () => {
+    const { buildAgentPrompt } = await import("../src/prompts.js");
+    const { session } = createSession("ISOLATED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Say ISOLATED", { pi, cwd: "/wt/copy", worktreeBase: "/repo" });
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).toMatchObject({ worktreeBase: "/repo" });
+
+    await runAgent(ctx, "Explore", "Say ISOLATED", { pi });
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("worktreeBase");
+  });
+
   it("passes the parent model runtime while retaining the legacy model registry", async () => {
     const { session } = createSession("AUTHENTICATED");
     createAgentSession.mockResolvedValue({ session });

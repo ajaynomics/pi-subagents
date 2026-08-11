@@ -371,6 +371,12 @@ export interface RunOptions {
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
+   * Directory the worktree copy was created from. Set only when `cwd` points
+   * into a worktree — the prompt then tells the agent to stay in the copy
+   * instead of following the inherited parent prompt back to the main tree.
+   */
+  worktreeBase?: string;
+  /**
    * Where .pi config is discovered (project extensions, skills, pi settings,
    * agent memory). Default: same as the working directory. The manager sets
    * this to the parent session's cwd when `SpawnOptions.cwd` points the
@@ -536,6 +542,7 @@ export async function runAgent(
 
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = {};
+  if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
 
   // Resolve extensions/skills: isolated overrides to false
   const extensions = options.isolated ? false : config.extensions;

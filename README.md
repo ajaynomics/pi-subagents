@@ -595,6 +595,8 @@ The agent gets a full, isolated copy of the repository. On completion:
 - **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned in the result
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
 
+The agent's system prompt names the worktree as an isolated copy and tells it to work only there, even if other instructions name the main checkout — otherwise an inherited parent prompt or a task prompt mentioning the project path walks it straight back out of the copy. This is a directive, not a sandbox: an agent with shell access can still `cd` out, so don't rely on `isolation` alone to protect the main checkout.
+
 The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. Initialize git and commit at least once, or omit `isolation`.

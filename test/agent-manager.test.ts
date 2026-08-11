@@ -763,7 +763,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     // survives isolation. Config still anchored to the parent.
     expect(runAgent).toHaveBeenCalledWith(
       mockCtx, "general-purpose", "test",
-      expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp" }),
+      expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp", worktreeBase: "/" }),
     );
     expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
   });
@@ -789,6 +789,20 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     const opts = vi.mocked(runAgent).mock.lastCall![3];
     expect(opts.cwd).toBe("/wt/copy");
     expect(opts.configCwd).toBeUndefined();
+    // The copy came from the parent session's cwd — that is what the prompt
+    // must name as off-limits (#187).
+    expect(opts.worktreeBase).toBe("/tmp");
+  });
+
+  it("no worktree — no worktreeBase, so no isolation block in the prompt", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    expect(vi.mocked(runAgent).mock.lastCall![3].worktreeBase).toBeUndefined();
   });
 
   it("relative cwd throws immediately; no orphan record", () => {

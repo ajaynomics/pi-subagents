@@ -286,6 +286,9 @@ export class AgentManager {
       // stay undefined otherwise so plain worktree runs keep resolving config
       // (incl. relative extension paths and memory) inside the worktree copy.
       cwd: worktreeCwd ?? customCwd,
+      // Set iff a worktree was created (see above) — names the directory the
+      // copy came from, so the prompt can tell the agent not to work there.
+      worktreeBase: worktreeCwd ? baseCwd : undefined,
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
