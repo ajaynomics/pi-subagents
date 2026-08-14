@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The pi compile baseline is declared instead of inferred.** The `@earendil-works/pi-*` packages were peers only, so 0.80.6 came from npm's peer auto-install and the committed lockfile rather than from any decision — the emergent pin the 0.14.0 entry below had to diagnose. They are now exact `0.80.6` devDependencies; the peer range stays `>=0.80.0` and consumers are unaffected.
+- **`compat-latest-pi` now runs typecheck and the full suite** instead of two hand-picked e2e files, so drift can't hide in an unlisted test — against pi 0.84.2 the job reported green while typecheck and four e2e suites were failing. Still `continue-on-error`. Both steps fail today, from pi 0.80.8's `modelRegistry` → `modelRuntime` migration hitting the shim in `src/agent-runner.ts` and the faux auth in `test/helpers/print-mode-runner.ts`; the job comment names them so they don't read as fresh breakage.
+- **`publishConfig.access` is set to `public`**, so publishing this scoped package no longer depends on `--access public` or on the access already set from a prior publish.
+
 ## [0.16.0] - 2026-08-14
 
 ### Added
