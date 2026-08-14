@@ -144,3 +144,117 @@ describe("AgentWidget", () => {
     expect(renderLines(manager, "background", () => "off")).toBe("");
   });
 });
+
+// The widget caps itself at MAX_WIDGET_LINES (12) and, past that, hands out a
+// line budget in priority order: running pairs, then the queued summary, then
+// finished lines. Running and finished increment `hiddenRunning`/`hiddenFinished`
+// when they don't fit; the queued line is dropped with NO counter at all, so the
+// footer under-reports and — worse — the queue vanishes from the UI entirely.
+// That happens exactly when the concurrency limit is saturated, i.e. when the
+// queue is the thing the user most needs to see.
+describe("AgentWidget overflow accounting", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  function record(id: string, status: string) {
+    return {
+      id,
+      type: "general-purpose",
+      description: `${id} description`,
+      status,
+      toolUses: 0,
+      startedAt: Date.now(),
+      completedAt: status === "completed" ? Date.now() : undefined,
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      compactionCount: 0,
+      isBackground: true,
+    };
+  }
+
+  /** Render a whole fleet (mixed statuses) and return the produced lines. */
+  function renderFleet(counts: { running: number; queued: number; finished: number }): string[] {
+    const agents = [
+      ...Array.from({ length: counts.running }, (_, i) => record(`run${i}`, "running")),
+      ...Array.from({ length: counts.queued }, (_, i) => record(`q${i}`, "queued")),
+      ...Array.from({ length: counts.finished }, (_, i) => record(`fin${i}`, "completed")),
+    ];
+    const activity = new Map(agents.map(a => [a.id, {
+      activeTools: new Map(),
+      toolUses: 0,
+      responseText: "",
+      turnCount: 1,
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    } as AgentActivity]));
+    const widget = new AgentWidget({ listAgents: () => agents } as any, activity, () => "all");
+    let factory: any;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
+    widget.update();
+    if (!factory) return [];
+    return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();
+  }
+
+  /** The `+N more (…)` footer, if the widget overflowed. */
+  const footer = (lines: string[]) => lines.find(l => l.includes("more ("));
+
+  /** Every fleet shape worth rendering — swept, not sampled. */
+  const SHAPES: { running: number; queued: number; finished: number }[] = [];
+  for (let running = 0; running <= 8; running++)
+    for (let queued = 0; queued <= 8; queued++)
+      for (let finished = 0; finished <= 8; finished++) SHAPES.push({ running, queued, finished });
+
+  // Swept rather than sampled: reserving the queued row moves `budget` around by
+  // hand, and an off-by-one there overflows the cap only for specific shapes.
+  it("never exceeds the line cap, for any fleet shape", () => {
+    for (const counts of SHAPES) {
+      expect(renderFleet(counts).length, JSON.stringify(counts)).toBeLessThanOrEqual(12);
+    }
+  });
+
+  it("never prints a footer that miscounts what it hid, for any fleet shape", () => {
+    for (const counts of SHAPES) {
+      const f = footer(renderFleet(counts));
+      if (!f) continue;
+      const total = Number(/\+(\d+) more/.exec(f)?.[1]);
+      const where = `${JSON.stringify(counts)} → ${f}`;
+      // A visible footer means something was dropped, so "+0 more ()" is a lie...
+      expect(total, where).toBeGreaterThan(0);
+      // ...and it counts agents that have their own row, so it can never exceed
+      // them — in particular the queued summary must not be counted as an agent.
+      expect(total, where).toBeLessThanOrEqual(counts.running + counts.finished);
+    }
+  });
+
+  it("keeps the queued summary visible when the running agents fill the widget", () => {
+    // 5 running (10 lines) consume the entire budget, so the queued line is
+    // dropped — and with it, any sign that 3 agents are waiting to start.
+    const lines = renderFleet({ running: 5, queued: 3, finished: 1 });
+    expect(lines.join("\n")).toContain("3 queued");
+  });
+
+  it("counts everything it hid — the footer total matches what is missing", () => {
+    // Computed rather than hardcoded, so this survives a scenario change but not
+    // a change to what the footer counts.
+    const counts = { running: 5, queued: 3, finished: 1 };
+    const lines = renderFleet(counts);
+    const body = lines.join("\n");
+
+    const shownRunning = counts.running - [...Array(counts.running).keys()]
+      .filter(i => !body.includes(`run${i} description`)).length;
+    const shownFinished = counts.finished - [...Array(counts.finished).keys()]
+      .filter(i => !body.includes(`fin${i} description`)).length;
+    const actuallyHidden = (counts.running - shownRunning) + (counts.finished - shownFinished);
+
+    const reported = Number(/\+(\d+) more/.exec(footer(lines) ?? "")?.[1] ?? -1);
+    expect(reported).toBe(actuallyHidden);
+  });
+
+  it("gives the queued summary priority over finished lines", () => {
+    const lines = renderFleet({ running: 4, queued: 2, finished: 3 });
+    expect(lines.join("\n")).toContain("2 queued");
+  });
+
+  it("renders everything with no footer when the fleet fits", () => {
+    const lines = renderFleet({ running: 2, queued: 1, finished: 1 });
+    expect(lines.join("\n")).toContain("1 queued");
+    expect(footer(lines)).toBeUndefined();
+  });
+});

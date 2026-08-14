@@ -324,7 +324,7 @@ export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
  * Try to find the right model for an agent type.
  * Priority: explicit option > config.model > parent model.
  */
-function resolveDefaultModel(
+export function resolveDefaultModel(
   parentModel: Model<any> | undefined,
   registry: { find(provider: string, modelId: string): Model<any> | undefined; getAvailable?(): Model<any>[] },
   configModel?: string,

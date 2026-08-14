@@ -256,3 +256,74 @@ describe("worktree", () => {
     });
   });
 });
+
+// cleanupWorktree's outer catch is the only place in the repo where a caught
+// error can DESTROY user work while reporting success-shaped output: it removes
+// the worktree and returns `{ hasChanges: false }`, which the manager renders as
+// "the agent changed nothing". If the commit or branch step fails, the agent's
+// commits go with the worktree and nobody is told.
+describe("cleanupWorktree — failure path", () => {
+  let repoDir: string;
+
+  beforeEach(() => { repoDir = initGitRepo(); });
+  afterEach(() => {
+    try { pruneWorktrees(repoDir); } catch { /* ignore */ }
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("short-circuits when the worktree directory is already gone", () => {
+    // Hits the existsSync guard at the top of cleanupWorktree, not the outer
+    // catch — cleanup can be called twice (settle path plus dispose), so it has
+    // to be idempotent rather than throw on the second call.
+    const wt = createWorktree(repoDir, "vanished")!;
+    expect(wt).toBeDefined();
+    rmSync(wt.path, { recursive: true, force: true });
+
+    const result = cleanupWorktree(repoDir, wt, "agent that vanished");
+
+    expect(result.hasChanges).toBe(false);
+    expect(result.branch).toBeUndefined();
+  });
+
+  it("swallows a git failure inside a still-present worktree and reports no changes", () => {
+    // The outer catch. The directory exists — so the existsSync guard above
+    // does not fire — but git cannot operate in it, which is what a corrupted
+    // or externally-detached worktree looks like. The agent's work is lost
+    // either way; what matters is that cleanup does not throw out of the
+    // manager's settle path and take the whole record down with it.
+    const wt = createWorktree(repoDir, "corrupt")!;
+    writeFileSync(join(wt.path, "work.txt"), "agent output");
+    // Break the worktree's link back to the repo.
+    writeFileSync(join(wt.path, ".git"), "gitdir: /nonexistent/path/that/is/not/a/repo");
+
+    const result = cleanupWorktree(repoDir, wt, "corrupted agent");
+
+    expect(result.hasChanges).toBe(false);
+    expect(result.branch).toBeUndefined();
+  });
+
+  it("creates the branch BEFORE removing the worktree, so a removal failure cannot lose commits", () => {
+    // Ordering is the actual safety property. If a refactor moved
+    // removeWorktree above the `git branch` call, the commits would be
+    // unreachable the moment removal succeeded and branching failed.
+    const wt = createWorktree(repoDir, "ordered")!;
+    writeFileSync(join(wt.path, "work.txt"), "agent output");
+
+    const result = cleanupWorktree(repoDir, wt, "ordered agent");
+
+    expect(result.hasChanges).toBe(true);
+    expect(result.branch).toBeDefined();
+    // The branch must exist in the MAIN repo after the worktree is gone —
+    // that is what makes the agent's work recoverable.
+    const branches = execFileSync("git", ["branch", "--list", result.branch!], {
+      cwd: repoDir, stdio: "pipe",
+    }).toString();
+    expect(branches).toContain(result.branch!);
+    expect(existsSync(wt.path)).toBe(false);
+    // And the commit is reachable from that branch.
+    const files = execFileSync("git", ["ls-tree", "--name-only", result.branch!], {
+      cwd: repoDir, stdio: "pipe",
+    }).toString();
+    expect(files).toContain("work.txt");
+  });
+});

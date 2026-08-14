@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
@@ -1222,5 +1225,325 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
     expect(record.status).toBe("error");
     expect(record.result).toBe("new partial progress"); // salvageable, this-run text
+  });
+});
+
+// The pool counter is decremented when a background agent settles, but ONLY for
+// records that took a slot in the first place. Nested children bypass the pool
+// (occupiesPoolSlot), so decrementing on their behalf drives runningBackground
+// negative and permanently lifts maxConcurrent. Only the START side of that rule
+// had coverage.
+describe("AgentManager — pool slot accounting on settle", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  /** A run that only settles when its returned resolver is called. */
+  function controllableRuns() {
+    const resolvers = new Map<string, (v: any) => void>();
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      new Promise<any>(resolve => {
+        resolvers.set(prompt as string, () => resolve({
+          responseText: "done",
+          session: mockSession(),
+          aborted: false,
+          steered: false,
+        }));
+      }),
+    );
+    return resolvers;
+  }
+
+  it("a nested child settling does not free a pool slot it never held", async () => {
+    const resolvers = controllableRuns();
+    manager = new AgentManager(undefined, 1);
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent", isBackground: true,
+    });
+    manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child", isBackground: true, depth: 2, parentAgentId: parentId,
+    });
+    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+      description: "sibling", isBackground: true,
+    });
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+
+    resolvers.get("child")!(undefined);
+    await manager.getRecord(manager.listAgents().find(a => a.description === "child")!.id)?.promise;
+
+    // The parent still holds the only slot, so the sibling must stay queued.
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+  });
+
+  it("a nested child failing does not free a pool slot either", async () => {
+    const rejectors = new Map<string, (e: any) => void>();
+    // Nothing resolves here — only the child is settled, by rejection.
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      new Promise<any>((_resolve, reject) => {
+        rejectors.set(prompt as string, reject);
+      }),
+    );
+    manager = new AgentManager(undefined, 1);
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent", isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child", isBackground: true, depth: 2, parentAgentId: parentId,
+    });
+    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+      description: "sibling", isBackground: true,
+    });
+
+    rejectors.get("child")!(new Error("child blew up"));
+    await manager.getRecord(childId)?.promise;
+
+    expect(manager.getRecord(childId)?.status).toBe("error");
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+  });
+
+  it("a top-level agent settling DOES free its slot", async () => {
+    // The other half of the rule — guards against over-correcting the fix into
+    // "never decrement", which would wedge the queue permanently.
+    const resolvers = controllableRuns();
+    manager = new AgentManager(undefined, 1);
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent", isBackground: true,
+    });
+    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+      description: "sibling", isBackground: true,
+    });
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+
+    resolvers.get("parent")!(undefined);
+    await manager.getRecord(parentId)?.promise;
+
+    expect(manager.getRecord(siblingId)?.status).toBe("running");
+  });
+});
+
+describe("AgentManager — drainQueue failure handling", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("a spawn that throws at drain time errors that record and keeps draining", async () => {
+    // Strict worktree isolation is the documented drain-time failure: the check
+    // runs in startAgent, which drainQueue calls minutes after spawn() returned.
+    // If the throw escaped drainQueue, every agent still queued behind it would
+    // be stranded forever — a hang, not an error.
+    const { createWorktree } = await import("../src/worktree.js");
+    const completed: AgentRecord[] = [];
+    manager = new AgentManager(r => { completed.push(r); }, 1);
+
+    let blocker: ((v: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      new Promise<any>(resolve => {
+        if (prompt === "first") blocker = () => resolve({
+          responseText: "ok", session: mockSession(), aborted: false, steered: false,
+        });
+      }),
+    );
+    vi.mocked(createWorktree).mockReturnValueOnce(undefined); // "not a git repo"
+
+    const firstId = manager.spawn(mockPi, mockCtx, "X", "first", { description: "first", isBackground: true });
+    const boomId = manager.spawn(mockPi, mockCtx, "X", "boom", {
+      description: "boom", isBackground: true, isolation: "worktree",
+    });
+    const lastId = manager.spawn(mockPi, mockCtx, "X", "last", { description: "last", isBackground: true });
+    expect(manager.getRecord(boomId)?.status).toBe("queued");
+
+    blocker!(undefined);
+    await manager.getRecord(firstId)?.promise;
+
+    const boom = manager.getRecord(boomId)!;
+    expect(boom.status).toBe("error");
+    expect(boom.error).toContain('isolation: "worktree"');
+    expect(boom.completedAt).toBeGreaterThan(0);
+    expect(completed.map(r => r.id)).toContain(boomId);
+    // ...and the drain continued past the failure rather than stopping there.
+    expect(manager.getRecord(lastId)?.status).toBe("running");
+  });
+
+  it("a cwd deleted between enqueue and drain is caught by the re-validation", async () => {
+    // spawn() validated this cwd when it was still there. startAgent checks
+    // again precisely because a queued agent can start minutes later (TOCTOU) —
+    // that second check has never run in a test.
+    manager = new AgentManager(undefined, 1);
+
+    let blocker: ((v: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      new Promise<any>(resolve => {
+        if (prompt === "first") blocker = () => resolve({
+          responseText: "ok", session: mockSession(), aborted: false, steered: false,
+        });
+      }),
+    );
+
+    const firstId = manager.spawn(mockPi, mockCtx, "X", "first", { description: "first", isBackground: true });
+    const goneDir = mkdtempSync(join(tmpdir(), "pi-mgr-gone-"));
+    const goneId = manager.spawn(mockPi, mockCtx, "X", "gone", {
+      description: "gone", isBackground: true, cwd: goneDir,
+    });
+    expect(manager.getRecord(goneId)?.status).toBe("queued");
+
+    rmSync(goneDir, { recursive: true, force: true }); // vanishes while queued
+
+    blocker!(undefined);
+    await manager.getRecord(firstId)?.promise;
+
+    const gone = manager.getRecord(goneId)!;
+    expect(gone.status).toBe("error");
+    expect(gone.error).toContain(goneDir); // the curated message, not a raw ENOENT
+  });
+
+  it("raising maxConcurrent releases queued agents immediately", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager = new AgentManager(undefined, 1);
+
+    manager.spawn(mockPi, mockCtx, "X", "a", { description: "a", isBackground: true });
+    const bId = manager.spawn(mockPi, mockCtx, "X", "b", { description: "b", isBackground: true });
+    expect(manager.getRecord(bId)?.status).toBe("queued");
+
+    manager.setMaxConcurrent(2);
+    expect(manager.getRecord(bId)?.status).toBe("running");
+  });
+
+  it("setMaxConcurrent clamps to at least 1", () => {
+    manager = new AgentManager(undefined, 4);
+    manager.setMaxConcurrent(0);
+    expect(manager.getMaxConcurrent()).toBe(1);
+  });
+});
+
+describe("AgentManager — pendingSteers flush", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("delivers steers queued before the session existed, in order, then clears them", async () => {
+    // A steer sent in the window between spawn and session creation is parked on
+    // the record. If the flush breaks, the user's course correction is silently
+    // dropped — steer_subagent already told them it was queued.
+    const steer = vi.fn().mockResolvedValue(undefined);
+    let release: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(resolve => {
+        release = () => {
+          opts.onSessionCreated?.({ steer, dispose: vi.fn() });
+          resolve({ responseText: "ok", session: mockSession(), aborted: false, steered: false });
+        };
+      }),
+    );
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+    const record = manager.getRecord(id)!;
+
+    manager.steer(id, "first correction");
+    manager.steer(id, "second correction");
+    expect(record.pendingSteers).toEqual(["first correction", "second correction"]);
+
+    release!();
+    await record.promise;
+
+    expect(steer.mock.calls.map(c => c[0])).toEqual(["first correction", "second correction"]);
+    // Cleared, or every later session creation would re-deliver the same steers.
+    expect(record.pendingSteers).toBeUndefined();
+  });
+
+  it("a steer that rejects does not fail the run", async () => {
+    const steer = vi.fn().mockRejectedValue(new Error("session closed"));
+    let release: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(resolve => {
+        release = () => {
+          opts.onSessionCreated?.({ steer, dispose: vi.fn() });
+          resolve({ responseText: "ok", session: mockSession(), aborted: false, steered: false });
+        };
+      }),
+    );
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+    const record = manager.getRecord(id)!;
+    manager.steer(id, "hello");
+
+    release!();
+    await expect(record.promise).resolves.toBe("ok");
+    expect(record.status).toBe("completed");
+  });
+});
+
+// waitForAll() had zero coverage despite backing the Symbol.for registry entry
+// and the print-mode host's shutdown hold. Its loop exists BECAUSE drainQueue
+// respects maxConcurrent: a single Promise.allSettled pass would return while
+// queued agents had not even started. That reads like a redundant loop, which
+// is exactly why it needs a test — collapsing it resolves early and silently.
+describe("AgentManager — waitForAll", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("waits for agents that were still QUEUED when it was called", async () => {
+    const resolvers = new Map<string, () => void>();
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      new Promise<any>(resolve => {
+        resolvers.set(prompt as string, () => resolve({
+          responseText: "done", session: mockSession(), aborted: false, steered: false,
+        }));
+      }),
+    );
+
+    manager = new AgentManager(undefined, 1);
+    const ids = ["a", "b", "c"].map(p =>
+      manager.spawn(mockPi, mockCtx, "X", p, { description: p, isBackground: true }),
+    );
+    // Only the first can be running; the other two are behind the pool.
+    expect(manager.getRecord(ids[1])?.status).toBe("queued");
+
+    let settled = false;
+    const all = manager.waitForAll().then(() => { settled = true; });
+
+    // Release ONLY the running one. A queued record has no `.promise` yet — it
+    // is created when the queue starts it — so a single `Promise.allSettled`
+    // pass sees just this one agent and would resolve here, with two agents
+    // still unstarted. The retry loop is what makes that not happen, and
+    // asserting after releasing everything would hide the difference entirely.
+    await new Promise(r => setImmediate(r));
+    resolvers.get("a")!();
+    await new Promise(r => setImmediate(r));
+    await new Promise(r => setImmediate(r));
+    expect(settled, "waitForAll resolved while agents were still queued").toBe(false);
+
+    for (const p of ["b", "c"]) {
+      resolvers.get(p)!();
+      await new Promise(r => setImmediate(r));
+      await new Promise(r => setImmediate(r));
+    }
+    await all;
+
+    expect(settled).toBe(true);
+    for (const id of ids) {
+      expect(manager.getRecord(id)?.status, id).toBe("completed");
+    }
+  });
+
+  it("resolves immediately when nothing is pending", async () => {
+    manager = new AgentManager();
+    await expect(manager.waitForAll()).resolves.toBeUndefined();
+  });
+
+  it("does not reject when an agent fails", async () => {
+    // allSettled, not all — one failing agent must not leave the caller hanging
+    // on a rejection it never asked for.
+    vi.mocked(runAgent).mockRejectedValue(new Error("boom"));
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+
+    await expect(manager.waitForAll()).resolves.toBeUndefined();
+    expect(manager.getRecord(id)?.status).toBe("error");
   });
 });

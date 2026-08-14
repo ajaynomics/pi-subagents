@@ -16,6 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
+import { buildNewAgentFile, disableInContent, enableInContent, findAgentFile, isEmptyStub, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -52,6 +53,7 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
+import { selectItem } from "./ui/select-item.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
@@ -221,6 +223,43 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
         : record.result
       : "No output.",
   };
+}
+
+/**
+ * Format an agent's tool scope for the Agent tool description.
+ *
+ * This suffix describes BUILT-IN scope only — extension tools are resolved when
+ * the agent runs (extensions can register asynchronously), so they cannot be
+ * enumerated while the description is being built. That is why an agent with
+ * `tools: "*, ext:mcp/search"` renders "*" and always has.
+ *
+ * Two distinctions matter, both of them capability claims the orchestrator acts on:
+ *
+ * - absent vs empty. `builtinToolNames: undefined` means the agent never narrowed
+ *   its tools (the shipped defaults); `[]` is what `tools: none` and an `ext:`-only
+ *   `tools:` parse to, and the runtime really does hand those agents no built-ins.
+ *   Rendering both "*" tells the orchestrator a tool-less agent can run `bash`.
+ * - empty-with-extensions vs empty-without. Zero built-ins does NOT imply zero
+ *   tools: `tools: none` alongside `extensions:` still surfaces every extension
+ *   tool (see test/fixtures/.pi/agents/tools-none.md, which expects three). Calling
+ *   that "none" understates the agent instead of overstating it — better, but still
+ *   wrong, and it would route work away from the only agent able to do it. "none"
+ *   is therefore reserved for agents that genuinely can call nothing: `isolated`
+ *   agents and those with `extensions: false`.
+ */
+export function formatToolsSuffix(cfg: AgentConfig | undefined): string {
+  const tools = cfg?.builtinToolNames;
+  if (!tools) return "*";
+  if (tools.length === 0) {
+    // `isolated` overrides extensions to false in the runner, so both mean the
+    // agent has no extension tools either — and then it truly has nothing.
+    const noExtensionTools = cfg?.isolated === true || cfg?.extensions === false;
+    return noExtensionTools ? "none" : "no built-ins, extension tools only";
+  }
+  const isFullSet =
+    tools.length === BUILTIN_TOOL_NAMES.length
+    && BUILTIN_TOOL_NAMES.every((t) => tools.includes(t));
+  return isFullSet ? "*" : tools.join(", ");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -705,16 +744,6 @@ export default function (pi: ExtensionAPI) {
     fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
     widget.onTurnStart();
   });
-
-  /** Format an agent's tool scope: "*" when it has all built-ins, else a comma-separated list. */
-  const formatToolsSuffix = (cfg: AgentConfig | undefined): string => {
-    const tools = cfg?.builtinToolNames;
-    if (!tools || tools.length === 0) return "*";
-    const isFullSet =
-      tools.length === BUILTIN_TOOL_NAMES.length
-      && BUILTIN_TOOL_NAMES.every((t) => tools.includes(t));
-    return isFullSet ? "*" : tools.join(", ");
-  };
 
   /** Build the full type list text dynamically from available agents only. */
   const buildTypeListText = () => {
@@ -1581,20 +1610,9 @@ Terse command-style prompts produce shallow, generic work.
 
   // ---- /agents interactive menu ----
 
-  const projectAgentsDir = () => join(process.cwd(), ".pi", "agents");
-  const workspaceAgentsDir = () => join(process.cwd(), ".agents", "agents");
-  const personalAgentsDir = () => join(getAgentDir(), "agents");
-
-  /** Find the file path of a custom agent by name, in discovery-precedence order (project, workspace, then global). */
-  function findAgentFile(name: string): { path: string; location: "project" | "workspace" | "personal" } | undefined {
-    const projectPath = join(projectAgentsDir(), `${name}.md`);
-    if (existsSync(projectPath)) return { path: projectPath, location: "project" };
-    const workspacePath = join(workspaceAgentsDir(), `${name}.md`);
-    if (existsSync(workspacePath)) return { path: workspacePath, location: "workspace" };
-    const personalPath = join(personalAgentsDir(), `${name}.md`);
-    if (existsSync(personalPath)) return { path: personalPath, location: "personal" };
-    return undefined;
-  }
+  // Directory resolution and the frontmatter edits live in agent-file-toggle.ts
+  // so they are reachable from tests — this command handler is only registered
+  // through `registerCommand`, which every test mocks.
 
   function getModelLabel(type: string, registry?: ModelRegistry): string {
     const cfg = getAgentConfig(type);
@@ -1749,19 +1767,15 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
-    const options = agents.map(a => {
+    // Numbered + item-paired. Two same-type agents spawned together with the
+    // same description render identically here, and resolving the choice by
+    // string match would open whichever came first.
+    const record = await selectItem(ctx.ui, "Running agents", agents, a => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
       return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
-
-    const choice = await ctx.ui.select("Running agents", options);
-    if (!choice) return;
-
-    // Find the selected agent by matching the option index
-    const idx = options.indexOf(choice);
-    if (idx < 0) return;
-    const record = agents[idx];
+    if (!record) return;
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list
@@ -1875,32 +1889,7 @@ Terse command-style prompts produce shallow, generic work.
       if (!overwrite) return;
     }
 
-    // Build the .md file content
-    const fmFields: string[] = [];
-    fmFields.push(`description: ${JSON.stringify(cfg.description)}`);
-    if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
-    fmFields.push(`tools: ${cfg.builtinToolNames?.join(", ") || "all"}`);
-    if (cfg.model) fmFields.push(`model: ${cfg.model}`);
-    if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
-    if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
-    if (cfg.allowedSubagents !== undefined) {
-      fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
-    }
-    fmFields.push(`prompt_mode: ${cfg.promptMode}`);
-    if (cfg.extensions === false) fmFields.push("extensions: false");
-    else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
-    if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);
-    if (cfg.skills === false) fmFields.push("skills: false");
-    else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
-    if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
-    if (cfg.inheritContext) fmFields.push("inherit_context: true");
-    if (cfg.runInBackground) fmFields.push("run_in_background: true");
-    if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
-    if (cfg.isolated) fmFields.push("isolated: true");
-    if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
-    if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
-
-    const content = `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
+    const content = serializeAgentFile(cfg);
 
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
@@ -1914,11 +1903,17 @@ Terse command-style prompts produce shallow, generic work.
     if (file) {
       // Existing file — set enabled: false in frontmatter (idempotent)
       const content = readFileSync(file.path, "utf-8");
-      if (content.includes("\nenabled: false\n")) {
+      const { content: updated, outcome } = disableInContent(content);
+      if (outcome === "already-disabled") {
         ctx.ui.notify(`${name} is already disabled.`, "info");
         return;
       }
-      const updated = content.replace(/^---\n/, "---\nenabled: false\n");
+      if (outcome === "no-frontmatter") {
+        // Nothing to edit — say so rather than rewriting the file unchanged and
+        // reporting success for a change that never happened.
+        ctx.ui.notify(`Cannot disable ${name}: ${file.path} has no frontmatter block.`, "error");
+        return;
+      }
       const { writeFileSync } = await import("node:fs");
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
@@ -1949,11 +1944,17 @@ Terse command-style prompts produce shallow, generic work.
     if (!file) return;
 
     const content = readFileSync(file.path, "utf-8");
-    const updated = content.replace(/^(---\n)enabled: false\n/, "$1");
+    const { content: updated, changed } = enableInContent(content);
+    if (!changed && !isEmptyStub(updated)) {
+      // The file carries no `enabled: false` to remove, so it was never disabled
+      // by us — reporting success here would hide a no-op.
+      ctx.ui.notify(`${name} is not disabled in ${file.path}.`, "info");
+      return;
+    }
     const { writeFileSync } = await import("node:fs");
 
     // If the file was just a stub ("---\n---\n"), delete it to restore the built-in default
-    if (updated.trim() === "---\n---" || updated.trim() === "---\n---\n") {
+    if (isEmptyStub(updated)) {
       unlinkSync(file.path);
       reloadCustomAgents();
       ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
@@ -2098,13 +2099,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
     ]);
     if (!modelChoice) return;
 
-    let modelLine = "";
-    if (modelChoice === "haiku") modelLine = "\nmodel: anthropic/claude-haiku-4-5";
-    else if (modelChoice === "sonnet") modelLine = "\nmodel: anthropic/claude-sonnet-4-6";
-    else if (modelChoice === "opus") modelLine = "\nmodel: anthropic/claude-opus-4-6";
+    let model: string | undefined;
+    if (modelChoice === "haiku") model = "anthropic/claude-haiku-4-5";
+    else if (modelChoice === "sonnet") model = "anthropic/claude-sonnet-4-6";
+    else if (modelChoice === "opus") model = "anthropic/claude-opus-4-6";
     else if (modelChoice === "custom...") {
-      const customModel = await ctx.ui.input("Model (provider/modelId)");
-      if (customModel) modelLine = `\nmodel: ${customModel}`;
+      model = (await ctx.ui.input("Model (provider/modelId)")) || undefined;
     }
 
     // 5. Thinking
@@ -2112,22 +2112,17 @@ Write the file using the write tool. Only write the file, nothing else.`;
     const thinkingChoice = await ctx.ui.select("Thinking level", ["inherit", ...THINKING_LEVELS]);
     if (!thinkingChoice) return;
 
-    let thinkingLine = "";
-    if (thinkingChoice !== "inherit") thinkingLine = `\nthinking: ${thinkingChoice}`;
-
     // 6. System prompt
     const systemPrompt = await ctx.ui.editor("System prompt", "");
     if (systemPrompt === undefined) return;
 
-    // Build the file
-    const content = `---
-description: ${description}
-tools: ${tools}${modelLine}${thinkingLine}
-prompt_mode: replace
----
-
-${systemPrompt}
-`;
+    const content = buildNewAgentFile({
+      description,
+      tools,
+      model,
+      thinking: thinkingChoice === "inherit" ? undefined : thinkingChoice,
+      systemPrompt,
+    });
 
     mkdirSync(targetDir, { recursive: true });
     const targetPath = join(targetDir, `${name}.md`);
@@ -2143,7 +2138,16 @@ ${systemPrompt}
     ctx.ui.notify(`Created ${targetPath}`, "info");
   }
 
-  function snapshotSettings(): SubagentsSettings {
+  /**
+   * Every settings mutation writes this WHOLE object back to disk, so a field
+   * missing here is erased from the user's subagents.json the next time they
+   * toggle something unrelated. `SubagentsSettings` has every field optional,
+   * so a `: SubagentsSettings` return annotation would let a newly-added setting
+   * be forgotten here and still type-check. `satisfies` instead: it still checks
+   * each value's type and rejects a mistyped key, but leaves the return type
+   * inferred so `_NoMissingSettingsKeys` below can check completeness.
+   */
+  function snapshotSettings() {
     return {
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
@@ -2165,8 +2169,19 @@ ${systemPrompt}
       // explicit configuration — which then fails loudly if general-purpose later
       // goes away. undefined is dropped by JSON.stringify.
       fallbackSubagent: getFallbackSubagent(),
-    };
+    } satisfies SubagentsSettings;
   }
+
+  // Compile-time completeness guard for snapshotSettings(). If a field is added
+  // to SubagentsSettings and not mirrored above, this Exclude is non-empty and
+  // fails to satisfy `never` — turning a silent settings-erasure bug into a
+  // typecheck error. `npm run typecheck` runs in CI.
+  type _NoMissingSettingsKeys =
+    Exclude<keyof SubagentsSettings, keyof ReturnType<typeof snapshotSettings>> extends never
+      ? true
+      : ["snapshotSettings() is missing a SubagentsSettings key"];
+  const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
+  void _settingsSnapshotIsComplete;
 
   const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth"]);
 

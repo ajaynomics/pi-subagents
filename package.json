@@ -38,11 +38,13 @@
     "test:e2e": "vitest run e2e --reporter=verbose",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/ test/",
-    "lint:fix": "biome check --fix src/ test/"
+    "lint:fix": "biome check --fix src/ test/",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
     "@types/node": "^25.5.0",
+    "@vitest/coverage-istanbul": "^4.1.10",
     "typescript": "^6.0.0",
     "vitest": "^4.0.18"
   },

@@ -215,4 +215,101 @@ describe("toolDescriptionMode", () => {
       warn.mockRestore();
     }
   });
+
+  // README:87 promises that disabling scheduling "removes `schedule` from the
+  // `Agent` tool spec (no LLM-context cost)". Only the {{scheduleGuideline}}
+  // TEXT expansion was tested — nothing asserted the schema itself, so the
+  // parameter could keep costing tokens (and stay callable) while the prose
+  // claimed otherwise.
+  describe("schedulingEnabled gates the schedule parameter", () => {
+    const props = (tools: Map<string, any>) =>
+      Object.keys(tools.get("Agent").parameters?.properties ?? {});
+
+    it("advertises `schedule` by default", () => {
+      expect(props(setup())).toContain("schedule");
+    });
+
+    it("removes `schedule` from the tool schema when scheduling is disabled", () => {
+      const names = props(setup({ schedulingEnabled: false }));
+      expect(names).not.toContain("schedule");
+      // The rest of the parameter surface is untouched — this gates one field,
+      // not the tool.
+      expect(names).toEqual(expect.arrayContaining(["prompt", "description", "subagent_type"]));
+    });
+  });
+
+  // The tool description is the only thing the orchestrator LLM knows about an
+  // agent's capabilities before spawning it. `tools: none` and an `ext:`-only
+  // `tools:` both parse to zero built-ins (custom-agents.ts parseToolsField),
+  // and test/fixtures/.pi/agents/tools-none.md pins that the *runtime* really
+  // does drop every built-in. So the description must not claim otherwise —
+  // an agent advertised as having `bash` that cannot run `bash` gets routed
+  // work it can only fail at.
+  describe("tool scope suffix reflects the real built-in set", () => {
+    function withAgent(name: string, frontmatter: string, settings?: Record<string, unknown>) {
+      const extra = frontmatter ? `${frontmatter}\n` : "";
+      return setup(settings, () => {
+        mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
+        writeFileSync(
+          join(tmpDir, ".pi", "agents", `${name}.md`),
+          `---\ndescription: ${name} agent.\n${extra}---\n\nBody.\n`,
+        );
+      });
+    }
+
+    it("`tools: none` never claims the full built-in set", () => {
+      const tools = withAgent("quiet", "tools: none");
+      const desc: string = tools.get("Agent").description;
+      expect(desc).not.toContain("- quiet: quiet agent. (Tools: *)");
+    });
+
+    it("`tools: none` says none only when the agent can call nothing at all", () => {
+      // extensions: false and isolated: true both leave the agent with zero
+      // built-ins AND zero extension tools — the one case "none" is true.
+      for (const fm of ["tools: none\nextensions: false", "tools: none\nisolated: true"]) {
+        const tools = withAgent("silent", fm);
+        expect(tools.get("Agent").description).toContain("- silent: silent agent. (Tools: none)");
+      }
+    });
+
+    it("`tools: none` with extensions loaded is not described as having no tools", () => {
+      // Zero built-ins is not zero tools: test/fixtures/.pi/agents/tools-none.md
+      // pins that such an agent still surfaces alpha_read, alpha_write, beta_tool.
+      // Saying "none" understates it and routes work away from the only agent
+      // that could do it — the mirror of the bug this suffix used to have.
+      const tools = withAgent("probe", 'tools: none\nextensions: "./ext-alpha.mjs"');
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- probe: probe agent. (Tools: no built-ins, extension tools only)");
+      expect(desc).not.toContain("- probe: probe agent. (Tools: *)");
+      expect(desc).not.toContain("- probe: probe agent. (Tools: none)");
+    });
+
+    it("an ext:-only `tools:` is described by what it actually has", () => {
+      const tools = withAgent("extonly", 'tools: "ext:probe.mjs"');
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- extonly: extonly agent. (Tools: no built-ins, extension tools only)");
+      expect(desc).not.toContain("- extonly: extonly agent. (Tools: *)");
+    });
+
+    it("compact mode shares the suffix builder and must not diverge", () => {
+      const tools = withAgent("quiet", "tools: none\nextensions: false", { toolDescriptionMode: "compact" });
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- quiet: quiet agent. (Tools: none)");
+      expect(desc).not.toContain("- quiet: quiet agent. (Tools: *)");
+    });
+
+    it("an omitted `tools:` still renders as * — absent means all built-ins", () => {
+      // Guards the fix from over-correcting: undefined (inherit everything,
+      // as the shipped defaults do) is not the same as [] (explicitly zero).
+      const tools = withAgent("broad", "");
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- broad: broad agent. (Tools: *)");
+    });
+
+    it("a narrowed `tools:` still lists the names it actually has", () => {
+      const tools = withAgent("narrow", "tools: read, grep");
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- narrow: narrow agent. (Tools: read, grep)");
+    });
+  });
 });

@@ -440,6 +440,16 @@ export class AgentWidget {
       let hiddenRunning = 0;
       let hiddenFinished = 0;
 
+      // Reserve the queued line's row up front. It is a single summary of N
+      // waiting agents, so it cannot be folded into the "+N more" count (which
+      // is denominated in agents) without either under-reporting it as 1 or
+      // inflating the total with agents that were never getting their own rows.
+      // Reserving costs at most one running agent — which IS counted below —
+      // and makes the drop unreachable. It matters most exactly when it used to
+      // vanish: the pool is saturated and the queue is what the user needs to see.
+      const queuedReserve = queuedLine ? 1 : 0;
+      budget -= queuedReserve;
+
       // 1. Running agents (2 lines each)
       for (const pair of runningLines) {
         if (budget >= 2) {
@@ -450,8 +460,9 @@ export class AgentWidget {
         }
       }
 
-      // 2. Queued line
-      if (queuedLine && budget >= 1) {
+      // 2. Queued line (always fits — its row was reserved above)
+      if (queuedLine) {
+        budget += queuedReserve;
         lines.push(queuedLine);
         budget--;
       }
