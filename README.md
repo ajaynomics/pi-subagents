@@ -7,6 +7,8 @@ A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-
 
 https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
+<img width="600" alt="pi-color-badges-white" src="https://github.com/user-attachments/assets/555dcae4-333e-4ff0-b420-7b3369c018a4" />
+
 
 ## Features
 
@@ -15,7 +17,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too
-- **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
+- **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context
@@ -164,7 +166,7 @@ Default agents can be **ejected** (`/agents` → select agent → Eject) to expo
 
 ## Custom Agents
 
-Define custom agent types by creating `.md` files. The filename becomes the agent type name. Any name is allowed — using a default agent's name overrides it.
+Define custom agent types by creating `.md` files. The filename becomes the `subagent_type` and dispatch identity; `name` and `display_name` only change the UI label. Using a default agent's filename overrides it.
 
 Agents are discovered from three locations (higher priority wins):
 
@@ -182,6 +184,7 @@ An unreadable or unparseable agent file is skipped, not fatal — a warning name
 
 ```markdown
 ---
+color: red
 description: Security Code Reviewer
 tools: read, grep, find, bash
 model: anthropic/claude-opus-4-6
@@ -211,7 +214,8 @@ All fields are optional — sensible defaults for everything.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `description` | filename | Agent description shown in tool listings |
-| `display_name` | — | Display name for UI (e.g. widget, agent list) |
+| `display_name` | filename | Display name for UI (e.g. widget, agent list). `name` is accepted as an alias so Claude Code agent files keep their label (`display_name` wins when both are set); either way the filename determines the `subagent_type` |
+| `color` | — | Background color for the agent name badge in the Agent tool header, widget, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
 | `tools` | all 7 | Which tools the agent can call. Built-in names (`read, grep, …`), `*` / `all` (all built-ins), `none`, and `ext:<extension>` / `ext:<extension>/<tool>` selectors for extension tools. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
@@ -665,6 +669,7 @@ src/
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
   default-agents.ts   # Embedded default agent configs (general-purpose, Explore, Plan)
   agent-types.ts      # Unified agent registry (defaults + user), tool name resolution
+  agent-color.ts      # Claude Code/Agency Agents name color parsing and badge rendering
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
