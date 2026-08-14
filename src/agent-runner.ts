@@ -856,7 +856,11 @@ export async function runAgent(
     sessionManager,
     settingsManager,
     modelRegistry: ctx.modelRegistry,
-    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
+    // `as never` is what keeps this assignable across the supported Pi range:
+    // pre-0.80.8 the field exists only via the `modelRuntime?: unknown` shim
+    // above, while newer Pi types it as `ModelRuntime` — a shape an opaque
+    // `unknown` read off the private facade field can never satisfy.
+    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
     customTools: nestedTools,
