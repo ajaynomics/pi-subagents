@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-08-14
+
 ### Documentation
 - **Three README statements corrected against the code they describe**, each now pinned by a test so the doc and the behavior can't drift apart again. (1) Scheduling was documented as forcing `run_in_background` to `true`; it does not — an explicit `run_in_background: false` alongside `schedule` is *refused*, and always has been. The 0.10.0 entry below carries the same error: `git log -S` shows the refusal shipped in the very commit that introduced scheduling, so both documents were written from the design sketch and never matched what was released. Refusing is also the intended behavior — silently flipping a parameter the caller explicitly set is the failure mode [#37](https://github.com/tintinweb/pi-subagents/issues/37) was filed about. (2) The completion-notification example showed a `transcript: .pi/output/agent-abc123.jsonl` line; that path was replaced by the OS-tmpdir layout in [#146](https://github.com/tintinweb/pi-subagents/pull/146) and the example was never updated, so it contradicted the paragraph six lines above it. (3) The `skills` frontmatter row read as though naming skills preloaded them *in addition to* the parent's; naming any list turns skill inheritance off and the agent gets only the named ones.
 
