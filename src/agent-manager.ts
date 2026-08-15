@@ -13,7 +13,8 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import { assignHandle, handleBase } from "./mention.js";
+import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
@@ -24,6 +25,13 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
+
+/**
+ * How many evicted agents stay addressable by name. Only a bound on memory —
+ * a session that spawns hundreds of agents shouldn't retain every one — and
+ * far above the handful anyone keeps in their head.
+ */
+const MAX_TOMBSTONES = 100;
 
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
@@ -70,6 +78,31 @@ interface SpawnArgs {
 
 interface SpawnOptions {
   description: string;
+  /**
+   * Optional memorable name for this instance, becoming a second handle
+   * (`@auth-audit`) alongside the type-derived one. Slugged, not validated —
+   * anything unusable degrades via `handleBase` rather than failing the spawn.
+   */
+  name?: string;
+  /**
+   * Reopen this pi session file instead of starting a fresh conversation, so a
+   * mention of an evicted agent continues where it left off. The agent's
+   * definition is still resolved from its type, so the continuation runs under
+   * the type's CURRENT config.
+   */
+  resumeSessionFile?: string;
+  /**
+   * Take an evicted agent's names back verbatim instead of allocating fresh
+   * ones, so a resumed conversation keeps the handle the user just typed —
+   * `handleBase(type)` cannot reproduce a numbered `explore-2`. Safe without an
+   * `assignHandle` pass because tombstoned names are excluded from allocation
+   * (`takenHandles`), so nothing live can be holding them.
+   *
+   * Internal capability, like `resumeSessionFile`: a forged handle would
+   * duplicate a live agent's name and make `resolveMention` ambiguous, so
+   * `spawnTopLevel` strips it from anything a caller sends.
+   */
+  reclaim?: { handle: string; alias?: string };
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
@@ -158,6 +191,14 @@ export class AgentManager {
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
 
+  /**
+   * Evicted agents that can still be reached by name, keyed by handle. Outlives
+   * the 10-minute record cleanup — that timer exists to bound memory, not to
+   * expire a conversation the user might still want — and is cleared alongside
+   * completed records on session start/switch.
+   */
+  private tombstones = new Map<string, AgentTombstone>();
+
   /** Queue of background agents waiting to start. */
   private queue: { id: string; start: () => void }[] = [];
   /** Number of currently running background agents. */
@@ -210,7 +251,19 @@ export class AgentManager {
     const record: AgentRecord = {
       id,
       type,
+      // Nested children are filtered out of every top-level surface, so no
+      // handle: nothing can address them and they must not consume a name a
+      // top-level sibling could otherwise take.
+      handle: options.parentAgentId !== undefined
+        ? undefined
+        // A reclaimed handle is used as-is: it belongs to the conversation this
+        // spawn is reopening, and re-deriving it would lose the numbering.
+        : options.reclaim?.handle ?? assignHandle(handleBase(type), this.takenHandles()),
       description: options.description,
+      // Reclaimed here, or filled in below from `name` — in which case it must
+      // see the handle this record just took, since both come out of the same
+      // namespace.
+      alias: options.parentAgentId === undefined ? options.reclaim?.alias : undefined,
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
       startedAt: Date.now(),
@@ -230,6 +283,12 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    // After the insert, so `takenHandles()` already counts this record's own
+    // handle — a spawn named after its own type gets `explore-2`, not a
+    // duplicate `explore` that would make resolution ambiguous.
+    if (record.handle !== undefined && record.alias === undefined && options.name !== undefined) {
+      record.alias = assignHandle(handleBase(options.name), this.takenHandles());
+    }
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
@@ -306,6 +365,8 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
+      resumeSessionFile: options.resumeSessionFile,
+      nested: options.parentAgentId !== undefined,
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must
@@ -340,6 +401,15 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        // Capture now, while the session object exists: after eviction this
+        // path is the only thing that can reopen the conversation, and an
+        // in-memory session reports undefined, which correctly means
+        // "nothing to come back to".
+        // Optional chaining, not defensiveness for its own sake: this is the
+        // only field read off the session at creation, so an older pi or a
+        // stubbed session must degrade to "not resumable" rather than throw
+        // and take the whole spawn down with it.
+        record.sessionFile = session.sessionManager?.getSessionFile?.();
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -734,6 +804,71 @@ export class AgentManager {
     return this.agents.get(id);
   }
 
+  /** Handles already in use, so a fresh spawn can pick an unclaimed one. */
+  private takenHandles(): Set<string> {
+    const taken = new Set<string>();
+    for (const record of this.agents.values()) {
+      if (record.handle) taken.add(record.handle);
+      if (record.alias) taken.add(record.alias);
+    }
+    // Tombstones hold their names too: an evicted `@explore` is still
+    // resurrectable, so a later Explore must become `explore-2` rather than
+    // shadowing a conversation the user can still reach.
+    for (const entry of this.tombstones.values()) {
+      taken.add(entry.handle);
+      if (entry.alias) taken.add(entry.alias);
+    }
+    return taken;
+  }
+
+  /**
+   * Resolve an `@name` from the prompt. Matches a top-level agent's handle
+   * case-insensitively, preferring one that can still be steered and otherwise
+   * the most recently started (which is the one a resume should continue), then
+   * falls back to an exact agent id so `@<agentId>` works too.
+   */
+  resolveMention(name: string): MentionResolution | undefined {
+    const wanted = name.toLowerCase();
+    let fallback: AgentRecord | undefined;
+    for (const record of this.agents.values()) {
+      if (record.parentAgentId !== undefined) continue;
+      // Handle and alias share one namespace, so at most one agent answers a
+      // name and it makes no difference which of the two matched.
+      if (record.handle?.toLowerCase() !== wanted && record.alias?.toLowerCase() !== wanted) continue;
+      if (record.status === "running" || record.status === "queued") return { kind: "live", record };
+      if (!fallback || record.startedAt > fallback.startedAt) fallback = record;
+    }
+    if (fallback) return { kind: "live", record: fallback };
+    const byId = this.agents.get(name);
+    if (byId?.parentAgentId === undefined && byId !== undefined) return { kind: "live", record: byId };
+    // Only once nothing live answers: a tombstone is a conversation to reopen,
+    // and reopening one while its record still exists would fork the session.
+    for (const entry of this.tombstones.values()) {
+      if (entry.handle.toLowerCase() === wanted || entry.alias?.toLowerCase() === wanted || entry.id === name) {
+        return { kind: "tombstone", entry };
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Forget an evicted agent, by handle. For the case where its session file has
+   * gone: the entry can then only ever fail, while still holding the name
+   * against the type that would otherwise start a fresh agent under it.
+   *
+   * A *successful* resume does not drop its tombstone — the live record it
+   * creates already wins in `resolveMention`, and overwrites the entry in place
+   * when it is itself evicted.
+   */
+  dropTombstone(handle: string): void {
+    this.tombstones.delete(handle);
+  }
+
+  /** Evicted agents whose conversation can still be reopened, newest first. */
+  listTombstones(): AgentTombstone[] {
+    return [...this.tombstones.values()].sort((a, b) => b.completedAt - a.completedAt);
+  }
+
   listAgents(): AgentRecord[] {
     return [...this.agents.values()].sort(
       (a, b) => b.startedAt - a.startedAt,
@@ -761,9 +896,35 @@ export class AgentManager {
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    this.tombstone(record);
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
+  }
+
+  /**
+   * Preserve enough of a departing record for `@handle` to reopen its
+   * conversation later. Nothing to keep unless it has both a handle to be
+   * addressed by and a session file to reopen — an in-memory session leaves no
+   * transcript, so the mention would have nothing to continue from.
+   */
+  private tombstone(record: AgentRecord): void {
+    if (!record.handle || !record.sessionFile) return;
+    this.tombstones.set(record.handle, {
+      handle: record.handle,
+      alias: record.alias,
+      id: record.id,
+      type: record.type,
+      description: record.description,
+      sessionFile: record.sessionFile,
+      completedAt: record.completedAt ?? Date.now(),
+    });
+    // Bound the memory a long session can accumulate. Oldest first, since the
+    // agent someone still wants to reach is the one they used most recently.
+    while (this.tombstones.size > MAX_TOMBSTONES) {
+      const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
+      this.tombstones.delete(oldest.handle);
+    }
   }
 
   private cleanup() {
@@ -787,6 +948,13 @@ export class AgentManager {
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
+    // Unconditional: both callers are session boundaries (`session_start` and
+    // `session_before_switch`), and `skipUnconsumed` only spares records whose
+    // results the LLM has yet to read — it does not make the sweep partial in
+    // the sense that matters here. A new session means new handles, or
+    // `@explore` would silently reach an agent the user never started. Claude
+    // Code resets its registry on `/clear` for the same reason.
+    this.tombstones.clear();
   }
 
   /** Whether any agents are still running or queued. */

@@ -20,6 +20,7 @@ import {
   findAgentFile,
   isDisabledContent,
   isEmptyStub,
+  locateAgentFile,
 } from "../src/agent-file-toggle.js";
 
 /** What the loader concludes about a file, via the same parser it really uses. */
@@ -265,6 +266,54 @@ describe("findAgentFile", () => {
 
   it("returns undefined when the agent has no file anywhere", () => {
     expect(findAgentFile("nope", tmpDir)).toBeUndefined();
+  });
+
+  // An agent's type comes from its frontmatter `name:` now, so `<type>.md` is a
+  // guess. Getting it wrong is not a harmless miss: `/agents → Disable` takes
+  // the no-file branch and writes a NEW stub, which loses to the real file on
+  // load — so the agent stays enabled while the toast reports success.
+  describe("locateAgentFile", () => {
+    it("uses the file the loader read, whatever it is called", () => {
+      write(join(tmpDir, ".pi", "agents"), "reviewer");
+      const sourcePath = join(tmpDir, ".pi", "agents", "reviewer.md");
+
+      expect(locateAgentFile("code-reviewer", sourcePath, tmpDir)).toEqual({
+        path: sourcePath,
+        location: "project",
+      });
+    });
+
+    it("classifies a workspace and a personal source path", () => {
+      write(join(tmpDir, ".agents", "agents"), "reviewer");
+      write(join(agentDir, "agents"), "auditor");
+
+      expect(locateAgentFile("code-reviewer", join(tmpDir, ".agents", "agents", "reviewer.md"), tmpDir))
+        .toMatchObject({ location: "workspace" });
+      expect(locateAgentFile("code-auditor", join(agentDir, "agents", "auditor.md"), tmpDir))
+        .toMatchObject({ location: "personal" });
+    });
+
+    it("falls back to the <type>.md probe for a built-in with no source file", () => {
+      write(join(tmpDir, ".pi", "agents"), "scout");
+
+      expect(locateAgentFile("scout", undefined, tmpDir)).toEqual({
+        path: join(tmpDir, ".pi", "agents", "scout.md"),
+        location: "project",
+      });
+    });
+
+    it("falls back when the recorded path has since been deleted", () => {
+      write(join(tmpDir, ".pi", "agents"), "scout");
+
+      expect(locateAgentFile("scout", join(tmpDir, ".pi", "agents", "gone.md"), tmpDir)).toEqual({
+        path: join(tmpDir, ".pi", "agents", "scout.md"),
+        location: "project",
+      });
+    });
+
+    it("finds nothing when neither the source path nor the probe resolves", () => {
+      expect(locateAgentFile("nope", join(tmpDir, ".pi", "agents", "gone.md"), tmpDir)).toBeUndefined();
+    });
   });
 });
 

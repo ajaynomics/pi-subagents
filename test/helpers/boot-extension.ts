@@ -41,8 +41,12 @@ export function makePi(): BootedPi {
 /** A mock ExtensionContext — the second half of what a tool's `execute` receives. */
 export function ctx(overrides: Record<string, unknown> = {}) {
   return {
+    // The interactive mode extensions normally run in. Set explicitly because
+    // the `@handle` input hook is TUI-only, so an absent mode would make every
+    // mention test exercise the headless fall-through instead.
+    mode: "tui",
     hasUI: false,
-    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn() },
     cwd: process.cwd(),
     model: undefined,
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },

@@ -26,7 +26,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./types.js";
 
@@ -53,6 +53,43 @@ export function findAgentFile(
   const personalPath = join(personalAgentsDir(), `${name}.md`);
   if (existsSync(personalPath)) return { path: personalPath, location: "personal" };
   return undefined;
+}
+
+/**
+ * Find the file behind a *loaded* agent, preferring the path the loader
+ * actually read (`AgentConfig.sourcePath`) over the `<type>.md` guess.
+ *
+ * An agent's type comes from its frontmatter `name:` now, so the two can
+ * disagree: `reviewer.md` declaring `name: code-reviewer` is loaded as
+ * `code-reviewer`, and probing for `code-reviewer.md` finds nothing. That is
+ * not a harmless miss — `/agents → Disable` would then take the no-file branch
+ * and write a NEW `code-reviewer.md` stub, which loses to `reviewer.md` on
+ * load, leaving the agent enabled while reporting success.
+ *
+ * The probe stays as the fallback: a built-in that was never ejected has no
+ * `sourcePath`, and a path can go stale between a load and this call.
+ */
+export function locateAgentFile(
+  name: string,
+  sourcePath: string | undefined,
+  cwd: string = process.cwd(),
+): { path: string; location: AgentFileLocation } | undefined {
+  if (sourcePath && existsSync(sourcePath)) {
+    return { path: sourcePath, location: classifyAgentDir(sourcePath, cwd) };
+  }
+  return findAgentFile(name, cwd);
+}
+
+/**
+ * Which discovery location a loaded agent's file came from. Only ever names
+ * a directory in a confirmation prompt, so an unrecognized parent — which
+ * loadCustomAgents cannot currently produce — reports as personal rather than
+ * widening the type for a case that has no better answer.
+ */
+function classifyAgentDir(path: string, cwd: string): AgentFileLocation {
+  if (path.startsWith(projectAgentsDir(cwd) + sep)) return "project";
+  if (path.startsWith(workspaceAgentsDir(cwd) + sep)) return "workspace";
+  return "personal";
 }
 
 export type DisableOutcome = "disabled" | "already-disabled" | "no-frontmatter";

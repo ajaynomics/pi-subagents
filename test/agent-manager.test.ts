@@ -253,6 +253,27 @@ describe("AgentManager — nested runtime propagation", () => {
     );
   });
 
+  it("tells the runner which spawns are nested, so only top-level ones persist", async () => {
+    // `rememberAgents` exists so `@handle` can reopen a conversation. A nested
+    // child never gets a handle, so persisting it writes a session file nothing
+    // can ever reach — the runner needs the fact to decline.
+    resolvedRun();
+    manager = new AgentManager();
+    const child = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child", isBackground: true, depth: 2, parentAgentId: "parent-1",
+    });
+    await manager.getRecord(child)!.promise;
+    expect(runAgent).toHaveBeenLastCalledWith(
+      mockCtx, "scout", "child", expect.objectContaining({ nested: true }),
+    );
+
+    const top = manager.spawn(mockPi, mockCtx, "scout", "top", { description: "top", isBackground: true });
+    await manager.getRecord(top)!.promise;
+    expect(runAgent).toHaveBeenLastCalledWith(
+      mockCtx, "scout", "top", expect.objectContaining({ nested: false }),
+    );
+  });
+
   it("defaults top-level subagents to depth one", async () => {
     resolvedRun();
     manager = new AgentManager();
@@ -1777,5 +1798,130 @@ describe("AgentManager — background resume", () => {
     expect(manager.abort(id)).toBe(true);
     expect(manager.getRecord(id)!.status).toBe("stopped");
     expect(onStarted).not.toHaveBeenCalled();
+  });
+});
+
+// A `name` on the spawn adds a SECOND handle rather than replacing the
+// type-derived one. That is the property the whole design rests on: if naming
+// freed up `explore`, then `@explore fix it` would quietly start a second
+// Explore alongside the running one instead of reaching it.
+describe("AgentManager — names as additive aliases", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  const spawnNamed = (m: AgentManager, type: string, name?: string) =>
+    m.spawn(mockPi, mockCtx, type, "go", {
+      description: "go",
+      ...(name !== undefined && { name }),
+      isBackground: true,
+    });
+
+  it("assigns the type handle as well as the alias", () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const record = manager.getRecord(spawnNamed(manager, "Explore", "auth-audit"))!;
+
+    expect(record.handle).toBe("explore");
+    expect(record.alias).toBe("auth-audit");
+  });
+
+  it("reaches the same agent by either name", () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = spawnNamed(manager, "Explore", "auth-audit");
+
+    expect(manager.resolveMention("auth-audit")).toMatchObject({ kind: "live", record: { id } });
+    expect(manager.resolveMention("explore")).toMatchObject({ kind: "live", record: { id } });
+  });
+
+  it("slugs a name that isn't typeable rather than rejecting the spawn", () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const record = manager.getRecord(spawnNamed(manager, "Explore", "Auth Audit!"))!;
+
+    expect(record.alias).toBe("auth-audit");
+  });
+
+  it("numbers an alias that collides with its own type handle", () => {
+    // `name: "explore"` on an Explore would otherwise produce two identical
+    // names on one record, and later a second agent could take one of them.
+    resolvedRun();
+    manager = new AgentManager();
+    const record = manager.getRecord(spawnNamed(manager, "Explore", "explore"))!;
+
+    expect(record.handle).toBe("explore");
+    expect(record.alias).toBe("explore-2");
+  });
+
+  it("stops a later type handle from colliding with an existing alias", () => {
+    resolvedRun();
+    manager = new AgentManager();
+    spawnNamed(manager, "Plan", "explore"); // alias squats the Explore name
+    const second = manager.getRecord(spawnNamed(manager, "Explore"))!;
+
+    expect(second.handle).toBe("explore-2");
+  });
+
+  it("refuses to alias an agent to the reserved main handle", () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const record = manager.getRecord(spawnNamed(manager, "Explore", "main"))!;
+
+    expect(record.alias).toBe("main-2");
+  });
+
+  it("gives an unnamed agent no alias at all", () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const record = manager.getRecord(spawnNamed(manager, "Explore"))!;
+
+    expect(record.alias).toBeUndefined();
+    expect(record.handle).toBe("explore");
+  });
+
+  it("never names a nested child, however it was spawned", () => {
+    // Nested agents are hidden from every top-level surface; a name would make
+    // one addressable through a boundary only its owner may cross.
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "go",
+      name: "child",
+      parentAgentId: "parent-1",
+      isBackground: true,
+    });
+
+    const record = manager.getRecord(id)!;
+    expect(record.alias).toBeUndefined();
+    expect(record.handle).toBeUndefined();
+    expect(manager.resolveMention("child")).toBeUndefined();
+  });
+
+  it("captures the session file so the agent can be resumed after eviction", async () => {
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.({
+        dispose: vi.fn(),
+        sessionManager: { getSessionFile: () => "/sessions/explore.jsonl" },
+      });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false } as any;
+    });
+    manager = new AgentManager();
+    const id = spawnNamed(manager, "Explore");
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)!.sessionFile).toBe("/sessions/explore.jsonl");
+  });
+
+  it("records no session file for an in-memory session", async () => {
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.({ dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false } as any;
+    });
+    manager = new AgentManager();
+    const id = spawnNamed(manager, "Explore");
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)!.sessionFile).toBeUndefined();
   });
 });

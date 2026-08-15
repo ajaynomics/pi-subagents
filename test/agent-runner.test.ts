@@ -10,6 +10,7 @@ const {
   getAgentDir,
   sessionManagerInMemory,
   sessionManagerCreate,
+  sessionManagerOpen,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
@@ -25,6 +26,7 @@ const {
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
+  sessionManagerOpen: vi.fn(() => ({ kind: "reopened-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
@@ -59,7 +61,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate },
+  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate, open: sessionManagerOpen },
   SettingsManager: { create: settingsManagerCreate },
 }));
 
@@ -130,6 +132,7 @@ import {
   SUBAGENT_TOOL_NAMES,
   setDefaultMaxTurns,
   setGraceTurns,
+  setRememberAgents,
 } from "../src/agent-runner.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
@@ -197,6 +200,10 @@ beforeEach(() => {
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
+  sessionManagerOpen.mockClear();
+  // The setting is process-global; a test that flips it must not leak the
+  // flip into the next one.
+  setRememberAgents(true);
   settingsManagerGetSessionDir.mockReset();
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
@@ -243,7 +250,9 @@ describe("agent-runner final output capture", () => {
       agentDir: "/mock/agent-dir",
     }));
     expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir");
-    expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp/worktree");
+    // Same claim as before `rememberAgents` flipped the default — the effective
+    // cwd reaches the session manager — now via the persistent constructor.
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", undefined, expect.anything());
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
@@ -797,7 +806,25 @@ function lastLoaderOpts(): Record<string, unknown> {
 }
 
 describe("agent-runner session persistence", () => {
-  it("uses an in-memory session by default", async () => {
+  it("persists by default, so a handle can reopen the conversation later", async () => {
+    // `rememberAgents` defaults on: the session file is the only thing an
+    // evicted agent leaves behind, so without it `@explore` after cleanup
+    // could only ever start a fresh agent.
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "persistent-session-manager" },
+    }));
+  });
+
+  it("keeps the session in memory when rememberAgents is off", async () => {
+    setRememberAgents(false);
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -806,9 +833,63 @@ describe("agent-runner session persistence", () => {
 
     expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
     expect(sessionManagerCreate).not.toHaveBeenCalled();
-    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      sessionManager: { kind: "memory-session-manager" },
-    }));
+  });
+
+  it("lets frontmatter override rememberAgents in both directions", async () => {
+    // The setting is only a default. An agent that declares itself ephemeral
+    // stays ephemeral with the setting on...
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: false }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(sessionManagerInMemory).toHaveBeenCalled();
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+
+    // ...and one that declares itself persistent still persists with it off.
+    sessionManagerInMemory.mockClear();
+    setRememberAgents(false);
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+  });
+
+  it("leaves a nested child in memory, since nothing can address it later", async () => {
+    // The default exists so `@handle` can reopen a conversation. A nested agent
+    // never gets a handle, so its transcript would be unreachable by anything —
+    // pure disk and /resume clutter.
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "go", { pi, nested: true });
+
+    expect(sessionManagerInMemory).toHaveBeenCalled();
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+  });
+
+  it("still persists a nested child that asks for it in frontmatter", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "go", { pi, nested: true });
+
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+  });
+
+  it("reopens an existing session file instead of starting a new conversation", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    // Neither create nor inMemory: both would start an empty conversation, and
+    // the point of a resume is that the history is already there.
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerOpen).toHaveBeenCalledWith("/sessions/explore.jsonl", "/normal/pi/sessions");
   });
 
   it("uses pi's normal persistent session location and links to the parent session", async () => {

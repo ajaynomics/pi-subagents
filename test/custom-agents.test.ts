@@ -584,32 +584,165 @@ enabled: false
     expect(agent.enabled).toBe(false);
   });
 
-  it("parses display_name frontmatter and gives it precedence over Claude Code name", () => {
+  it("takes the agent type from frontmatter name, not the filename", () => {
+    // Claude Code's rule: "the filename doesn't have to match". The same file
+    // dropped into either tool must dispatch under the same type.
+    writeAgent("blubb", `---
+name: code-review
+description: Reviews code
+---
+
+Agent prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("code-review")!.name).toBe("code-review");
+    expect(result.get("blubb")).toBeUndefined();
+  });
+
+  it("records the file it was read from, not the one its type would name", () => {
+    // `/agents` edits `sourcePath`: probing for `<type>.md` finds nothing here,
+    // and its no-file branch writes a stub that loses to this file on load.
+    writeAgent("blubb", `---
+name: code-review
+description: Reviews code
+---
+
+Agent prompt.`);
+
+    expect(loadCustomAgents(tmpDir).get("code-review")!.sourcePath)
+      .toBe(join(tmpDir, ".pi", "agents", "blubb.md"));
+  });
+
+  it("falls back to the filename for an empty or blank declared name", () => {
+    // A quoted empty `name:` would otherwise register the agent under the empty
+    // type — unspawnable, and it takes the filename-derived one down with it.
+    writeAgent("myagent", "---\nname: \"\"\ndescription: My Agent\n---\n\nPrompt.");
+    writeAgent("other", "---\nname: \"   \"\ndescription: Other\n---\n\nPrompt.");
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("myagent")!.name).toBe("myagent");
+    expect(result.get("other")!.name).toBe("other");
+    expect(result.has("")).toBe(false);
+  });
+
+  it("trims a declared name so it matches what the user meant to type", () => {
+    writeAgent("blubb", "---\nname: \" code-review \"\ndescription: Reviews code\n---\n\nPrompt.");
+
+    expect(loadCustomAgents(tmpDir).get("code-review")!.name).toBe("code-review");
+  });
+
+  it("falls back to the filename when no name is declared", () => {
+    // Claude Code requires `name`; most existing files here predate it and
+    // must keep loading under the identity they already dispatch by.
     writeAgent("myagent", `---
-name: Claude Name
+description: My Agent
+---
+
+Agent prompt.`);
+
+    expect(loadCustomAgents(tmpDir).get("myagent")!.name).toBe("myagent");
+  });
+
+  it("keeps display_name as a label only, independent of the type", () => {
+    writeAgent("blubb", `---
+name: code-review
 description: My Agent
 display_name: MyAgent
 ---
 
 Agent prompt.`);
 
-    const result = loadCustomAgents(tmpDir);
-    expect(result.get("myagent")!.displayName).toBe("MyAgent");
+    const agent = loadCustomAgents(tmpDir).get("code-review")!;
+    expect(agent.name).toBe("code-review");
+    expect(agent.displayName).toBe("MyAgent");
   });
 
-  it("uses Claude Code name as the display-name fallback", () => {
-    writeAgent("code-reviewer", `---
-name: Code Reviewer
+  it("leaves displayName unset so the badge falls back to the type", () => {
+    // A Claude Code file has no display_name; `getConfig` resolves the label
+    // to the type, so it still badges as "code-reviewer" as it did before.
+    writeAgent("whatever", `---
+name: code-reviewer
 description: Reviews code
 color: "#8B5CF6"
 ---
 
 Agent prompt.`);
 
+    const agent = loadCustomAgents(tmpDir).get("code-reviewer")!;
+    expect(agent.name).toBe("code-reviewer");
+    expect(agent.displayName).toBeUndefined();
+    expect(agent.color).toBe("#8B5CF6");
+  });
+
+  it("accepts a name Claude Code accepts, however unlike a type it looks", () => {
+    // Its docs describe names as "lowercase letters and hyphens", but the only
+    // load failure they state is the colon — so this must still load.
+    writeAgent("reviewer", `---
+name: Code Reviewer
+description: Reviews code
+---
+
+Agent prompt.`);
+
+    expect(loadCustomAgents(tmpDir).get("Code Reviewer")!.name).toBe("Code Reviewer");
+  });
+
+  it("refuses a name containing the plugin-scope separator", () => {
+    // Claude Code doesn't load these. Skipping beats loading it under the
+    // filename, which would dispatch an agent whose declared identity nothing
+    // honoured.
+    writeAgent("scoped", `---
+name: my-plugin:reviewer
+description: Reviews code
+---
+
+Agent prompt.`);
+
     const result = loadCustomAgents(tmpDir);
-    expect(result.get("code-reviewer")!.name).toBe("code-reviewer");
-    expect(result.get("code-reviewer")!.displayName).toBe("Code Reviewer");
-    expect(result.get("code-reviewer")!.color).toBe("#8B5CF6");
+    expect(result.get("my-plugin:reviewer")).toBeUndefined();
+    expect(result.get("scoped")).toBeUndefined();
+  });
+
+  it("does not claim the rejected file was overriding its filename's agent", () => {
+    // It would have registered under its *declared* name, which a colon keeps
+    // out of the registry entirely — so it shadowed nothing. Reporting a
+    // substitution of the same-named file from another directory describes a
+    // swap that never happened, and points at an agent that is unchanged.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeWorkspaceAgent("scoped", "---\ndescription: An unrelated agent\n---\n\nBody.");
+      writeAgent("scoped", "---\nname: my-plugin:reviewer\ndescription: Reviews code\n---\n\nBody.");
+
+      const result = loadCustomAgents(tmpDir);
+
+      expect(result.get("scoped")?.description).toBe("An unrelated agent");
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain("reserved for plugin-scoped identifiers");
+      expect(message).not.toContain("now loads from");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("lets a later file win a declared-name clash, as a filename clash always did", () => {
+    // Filenames were unique per directory by construction; declared names are
+    // not, so two files in one directory can now claim the same type.
+    writeAgent("a-first", `---
+name: shared
+description: first
+---
+
+First.`);
+    writeAgent("b-second", `---
+name: shared
+description: second
+---
+
+Second.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("shared")!.description).toBe("second");
+    expect([...result.keys()].filter(k => k === "shared")).toHaveLength(1);
   });
 
   it("parses disallowed_tools as csv list", () => {

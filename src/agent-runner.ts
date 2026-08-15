@@ -312,6 +312,20 @@ export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurn
 /** Set the default max turns value. undefined or 0 = unlimited, otherwise minimum 1. */
 export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
 
+/**
+ * Project default for `persist_session`, from the `rememberAgents` setting.
+ * On by default: a persisted session is what lets `@handle` reopen an agent's
+ * conversation after its record has been evicted, which is the whole point of
+ * addressing an agent by a name that outlives one run. Per-agent frontmatter
+ * still overrides it in both directions.
+ */
+let rememberAgents = true;
+
+/** Whether subagent sessions are persisted by default. */
+export function getRememberAgents(): boolean { return rememberAgents; }
+/** Set whether subagent sessions are persisted by default. */
+export function setRememberAgents(b: boolean): void { rememberAgents = b; }
+
 /** Additional turns allowed after the soft limit steer message. */
 let graceTurns = 5;
 
@@ -368,6 +382,23 @@ export interface RunOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Reopen this pi session file rather than starting an empty conversation.
+   * `createAgentSession` seeds itself from whatever its SessionManager holds,
+   * so pointing it at an existing file rehydrates that agent's history and the
+   * prompt continues it. Everything else — tools, model, system prompt, turn
+   * caps — is still resolved from the agent type, so the continuation runs
+   * under the type's *current* definition, not the one the original run used.
+   */
+  resumeSessionFile?: string;
+  /**
+   * True when another agent spawned this one. Only top-level agents get a
+   * handle, so only they can be reopened by name — which is the whole reason
+   * `rememberAgents` persists a session at all. A nested run's transcript would
+   * be unreachable by anything, so it stays in memory unless its own
+   * frontmatter asks otherwise.
+   */
+  nested?: boolean;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -837,11 +868,25 @@ export async function runAgent(
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  const sessionManager = agentConfig?.persistSession
-    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
-        parentSession: ctx.sessionManager.getSessionFile(),
-      })
-    : SessionManager.inMemory(effectiveCwd);
+  // Frontmatter wins when it says anything; otherwise the project default,
+  // which `rememberAgents` supplies for top-level agents only. Same precedence
+  // as `outputTranscript`.
+  const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  const sessionManager = options.resumeSessionFile
+    // Reopening an existing conversation: the file already carries its own
+    // header (cwd, parent) and history, so none of the create-time options
+    // apply. `sessionDir` still matters for a later /new or /branch off it.
+    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+    : persistSession
+      ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
+          // Optional metadata — it only nests the subagent under its spawner in
+          // `/resume`. Until `rememberAgents` this ran solely for the rare
+          // `persist_session: true` agent; now it runs for every spawn, so a
+          // context without a session manager (a bare programmatic ctx) must
+          // still persist rather than take the whole spawn down.
+          parentSession: ctx.sessionManager?.getSessionFile?.(),
+        })
+      : SessionManager.inMemory(effectiveCwd);
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.

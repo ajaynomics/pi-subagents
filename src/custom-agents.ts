@@ -9,6 +9,21 @@ import { BUILTIN_TOOL_NAMES } from "./agent-types.js";
 import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
 
 /**
+ * The one thing a declared `name:` may not contain, matching Claude Code
+ * exactly: it reserves `:` for plugin-scoped identifiers (`my-plugin:reviewer`)
+ * and refuses to load a file whose name uses one.
+ *
+ * Nothing else is rejected. Claude Code's docs describe names as "lowercase
+ * letters and hyphens", but that is guidance — the only stated load failure is
+ * the colon, so `name: Code Reviewer` must work here too. (The stricter
+ * letters/digits/underscore/hyphen regex in Claude Code applies to the Agent
+ * tool's spawn-time `name` parameter, which is a different field.) Mixed case
+ * has to be allowed regardless: the built-in types `Explore` and `Plan` use it,
+ * and a file must be able to override one.
+ */
+const RESERVED_IN_TYPE = ":";
+
+/**
  * Scan for custom agent .md files from multiple locations.
  * Discovery hierarchy (higher priority wins):
  *   1. Project:   <cwd>/.pi/agents/*.md (authoritative — also where /agents writes)
@@ -19,6 +34,12 @@ import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
  * between the two project locations, .pi/agents wins — .pi stays the project
  * authority; .agents/agents is an additional read location.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
+ *
+ * An agent's type comes from its frontmatter `name:`, falling back to the
+ * filename — Claude Code's rule, where "the filename doesn't have to match".
+ * Because the type is now declared rather than derived from a unique path, two
+ * files can claim the same one; the later load wins, as it always has for a
+ * filename clash, and `warnSkippedOverride` reports the substitution.
  */
 export function loadCustomAgents(cwd: string, strict = false): Map<string, AgentConfig> {
   const globalDir = join(getAgentDir(), "agents");
@@ -47,22 +68,48 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
   }
 
   for (const file of files) {
-    const name = basename(file, ".md");
+    const filenameType = basename(file, ".md");
 
     const path = join(dir, file);
 
     const parsed = readAgentFile(path, strict);
     if (!parsed) {
-      warnSkippedOverride(name, agents);
+      warnSkippedOverride(filenameType, agents);
       continue;
     }
     const { frontmatter: fm, body } = parsed;
+
+    // Claude Code's rule: `name:` IS the agent type, and the filename need not
+    // match. Absent, the filename stands in — Claude Code requires the field,
+    // but most files here predate it and must keep loading.
+    const declared = str(fm.name)?.trim();
+    if (declared?.includes(RESERVED_IN_TYPE)) {
+      // Refusing beats silently substituting: the file would otherwise load
+      // under its filename, so `Agent({subagent_type})` would succeed against
+      // an agent whose declared identity nothing honoured.
+      warnIfNew(
+        `Agent file ${path} declares name "${declared}", which contains "${RESERVED_IN_TYPE}" — reserved for `
+        + "plugin-scoped identifiers. Rename it, or move the label to `display_name:`. Skipping.",
+      );
+      // No `warnSkippedOverride`: this file would have registered under its
+      // *declared* name, which nothing else can hold (a colon keeps it out of
+      // the registry), so it shadowed nothing. Passing the filename instead
+      // would report a substitution of an unrelated agent that never happened.
+      continue;
+    }
+    // `||`, not `??`: a quoted empty or all-whitespace `name:` would otherwise
+    // register the agent under the empty type — unspawnable, and it takes the
+    // filename-derived one down with it.
+    const name = declared || filenameType;
 
     const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
 
     agents.set(name, {
       name,
-      displayName: str(fm.display_name) ?? str(fm.name),
+      // Only `display_name` now: `name` is the type, and `getConfig` already
+      // falls back to the type when no label is set — so a Claude Code file
+      // with `name: code-reviewer` still badges as "code-reviewer".
+      displayName: str(fm.display_name),
       color: str(fm.color),
       description: str(fm.description) ?? name,
       builtinToolNames,
