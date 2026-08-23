@@ -737,6 +737,17 @@ export default function (pi: ExtensionAPI) {
             const record = manager.getRecord(id);
             return !record?.parentAgentId && manager.abort(id);
           },
+          consumeResult: (id) => {
+            const record = resolveAgentRef(id);
+            // Same guard as get_subagent_result: a running agent has no result
+            // to consume, and its notification is still the caller's only
+            // signal that it finished.
+            if (!record || record.parentAgentId) return false;
+            if (record.status === "running" || record.status === "queued") return false;
+            record.resultConsumed = true;
+            cancelNudge(record.id);
+            return true;
+          },
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
@@ -1001,6 +1012,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
+    rpcHandle?.unsubConsume();
     rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
