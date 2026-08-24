@@ -48,6 +48,14 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
+### Other hosts
+
+This extension is developed and tested against [pi](https://pi.dev).
+
+Third-party adapters report running it elsewhere. These are maintained independently of this project: not tested here, not covered by our CI, and compatibility may break with any release.
+
+- **DeepSeek Harness (`dsh`)** — via an adapter that maps pi's host API onto native DSH agents. Details and reports: [#258](https://github.com/tintinweb/pi-subagents/issues/258)
+
 ## Quick Start
 
 The parent agent spawns sub-agents using the `Agent` tool:
