@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-08-24
+
 ### Added
 - **`maxConcurrentForeground` — an opt-in concurrency limit for blocking subagents** ([#253](https://github.com/tintinweb/pi-subagents/issues/253) — thanks [@WinPooh32](https://github.com/WinPooh32)). `maxConcurrent` never covered foreground agents, and pi dispatches a message's tool calls through `Promise.all`, so several `Agent` calls with `run_in_background: false` in one message ran with no ceiling at all — expensive rather than fast on local models, where parallel agents thrash the prompt cache. They now queue in a second pool, deliberately independent of `maxConcurrent`: a foreground agent blocks the parent anyway, so charging it to the background pool would let a saturated pool starve the main session. Default `0` = unlimited, which is the existing behaviour exactly; set it at `/agents → Settings → Max foreground concurrency` or in `subagents.json`, applied live. A waiting agent shows in `/agents` as `queued` and can be stopped there or with Esc. Nested children are exempt — their parent is blocked *awaiting them*, so queueing a child behind its own parent would deadlock — as are detached spawns and foreground `resume`.
 
