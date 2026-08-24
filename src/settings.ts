@@ -11,6 +11,28 @@ import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from 
 export interface SubagentsSettings {
   maxConcurrent?: number;
   /**
+   * Max concurrent FOREGROUND (blocking) agents — `0` = unlimited, the default,
+   * which preserves the behaviour that has always applied: nothing bounded
+   * foreground work, and pi dispatches a message's tool calls through
+   * `Promise.all`, so an unqualified fan-out of blocking `Agent` calls runs all
+   * at once. Set it to bound that (#253 — on local models, parallel agents
+   * thrash the prompt cache).
+   *
+   * Deliberately independent of `maxConcurrent` rather than folded into it: a
+   * foreground agent blocks the parent anyway, so charging it to the background
+   * pool would let a saturated pool starve the main session of work it could
+   * have done itself.
+   *
+   * Bounds only spawns a caller is blocking on inline. Nested children are
+   * exempt — their parent is blocked awaiting them, so queueing a child behind
+   * its own parent would deadlock — and so are detached spawns from
+   * cross-extension RPC or `@handle` mentions, which block nobody and are
+   * documented to start immediately. Foreground `resume` is also outside the
+   * pool: it reuses an existing session and never reaches the spawn path, so
+   * several blocking resumes in one message can still exceed the limit.
+   */
+  maxConcurrentForeground?: number;
+  /**
    * 0 = unlimited — the extension's single source of truth for that convention:
    * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
    * `/agents` → Settings input prompt explicitly says "0 = unlimited".
@@ -266,6 +288,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
+  setMaxConcurrentForeground: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
@@ -317,6 +340,15 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxConcurrent as number) <= MAX_CONCURRENT_CEILING
   ) {
     out.maxConcurrent = r.maxConcurrent as number;
+  }
+  // Floor 0, not 1 like maxConcurrent above: 0 is the documented "unlimited"
+  // value and the default, so dropping it would silently be unrepresentable.
+  if (
+    Number.isInteger(r.maxConcurrentForeground) &&
+    (r.maxConcurrentForeground as number) >= 0 &&
+    (r.maxConcurrentForeground as number) <= MAX_CONCURRENT_CEILING
+  ) {
+    out.maxConcurrentForeground = r.maxConcurrentForeground as number;
   }
   if (
     Number.isInteger(r.defaultMaxTurns) &&
@@ -455,6 +487,9 @@ export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()):
 /** Apply persisted settings to the in-memory state via caller-supplied setters. */
 export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers): void {
   if (typeof s.maxConcurrent === "number") appliers.setMaxConcurrent(s.maxConcurrent);
+  if (typeof s.maxConcurrentForeground === "number") {
+    appliers.setMaxConcurrentForeground(s.maxConcurrentForeground);
+  }
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);

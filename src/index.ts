@@ -661,6 +661,10 @@ export default function (pi: ExtensionAPI) {
     // Bypasses handle allocation, so a forged value would duplicate a live
     // agent's name and make `@handle` ambiguous. Same rule: dispatcher only.
     delete safeOptions.reclaim;
+    // Every spawn through here is DETACHED — the caller gets an id back and
+    // awaits nothing. A forged `blocking` would charge it to the foreground
+    // pool and could defer it behind a queue whose gate nobody is holding.
+    delete safeOptions.blocking;
     return spawnResolved(piRef, ctxRef, type, prompt, safeOptions);
   };
 
@@ -1302,6 +1306,7 @@ export default function (pi: ExtensionAPI) {
   applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+      setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
@@ -2018,6 +2023,10 @@ Terse command-style prompts produce shallow, generic work.
       let spinnerFrame = 0;
       const startedAt = Date.now();
       let fgId: string | undefined;
+      // Set only while the spawn is parked on a foreground concurrency slot
+      // (maxConcurrentForeground); undefined the rest of the time, including
+      // always when the limit is unset.
+      let queuedAhead: number | undefined;
 
       const streamUpdate = () => {
         // Spend from the record, everything else from the live tracker. `fgId`
@@ -2032,8 +2041,15 @@ Terse command-style prompts produce shallow, generic work.
           turnCount: fgState.turnCount,
           maxTurns: fgState.maxTurns,
           durationMs: Date.now() - startedAt,
+          // Deliberately still "running" while queued: the renderer routes any
+          // status it doesn't know to raw text (see the catch-all below), which
+          // would drop the spinner and read as hung. Only the activity line
+          // changes — "thinking…" would be a lie for an agent that has not
+          // started and may not for minutes.
           status: "running",
-          activity: describeActivity(fgState.activeTools, fgState.responseText),
+          activity: queuedAhead === undefined
+            ? describeActivity(fgState.activeTools, fgState.responseText)
+            : `queued — waiting for a foreground slot${queuedAhead > 0 ? ` (${queuedAhead} ahead)` : ""}`,
           spinnerFrame: spinnerFrame % SPINNER.length,
         };
         onUpdate?.({
@@ -2050,6 +2066,13 @@ Terse command-style prompts produce shallow, generic work.
       const origOnSession = fgCallbacks.onSessionCreated;
       fgCallbacks.onSessionCreated = (session: any) => {
         origOnSession(session);
+        // It really started — stop reporting it as queued, and repaint now
+        // rather than leaving the stale line up for the next spinner tick.
+        // Guarded, so a spawn that never queued emits no extra update.
+        if (queuedAhead !== undefined) {
+          queuedAhead = undefined;
+          streamUpdate();
+        }
         for (const a of manager.listAgents()) {
           if (a.session === session) {
             fgId = a.id;
@@ -2091,6 +2114,10 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          // Deliberately does NOT set fgId: that drives agentActivity, the
+          // widget and the `finally` cleanup below, none of which should see an
+          // agent that has no session and may never get one.
+          onQueued: (_id, ahead) => { queuedAhead = ahead; streamUpdate(); },
           ...fgCallbacks,
         }, (fgAgentId) => {
           // onSpawned: called synchronously after spawn, before onSessionCreated fires.
@@ -2766,6 +2793,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
     const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
+      // Exempt from maxConcurrentForeground. This runs from a modal wizard, not
+      // a tool call: it passes no signal, and Esc in `ctx.ui` never reaches the
+      // manager — so a user waiting behind a full pool would have no way to
+      // cancel at all. It is also one human action that cannot fan out, which
+      // is what the limit exists to bound. It still counts once started.
+      bypassQueue: true,
     });
 
     if (record.status === "error") {
@@ -2869,6 +2902,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
   function snapshotSettings() {
     return {
       maxConcurrent: manager.getMaxConcurrent(),
+      // 0 = unlimited, and the default — see SubagentsSettings.
+      maxConcurrentForeground: manager.getMaxConcurrentForeground(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -2910,11 +2945,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
   const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
   void _settingsSnapshotIsComplete;
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth"]);
+  const NUMERIC_IDS = new Set([
+    "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
+  ]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
+      const mcf = manager.getMaxConcurrentForeground();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -2933,6 +2971,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Max concurrent background agents (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
+        },
+        {
+          id: "maxConcurrentForeground",
+          label: "Max foreground concurrency",
+          description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
+          currentValue: String(mcf),
+          values: [String(mcf)],
         },
         {
           id: "defaultMaxTurns",
@@ -3095,6 +3140,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
         if (n >= 1) {
           manager.setMaxConcurrent(n);
           notifyApplied(ctx, `Max concurrency set to ${n}`);
+        }
+      } else if (id === "maxConcurrentForeground") {
+        // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          manager.setMaxConcurrentForeground(n);
+          notifyApplied(ctx, n === 0
+            ? "Max foreground concurrency set to unlimited"
+            : `Max foreground concurrency set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -3275,19 +3329,23 @@ Write the file using the write tool. Only write the file, nothing else.`;
     if (result && NUMERIC_IDS.has(result)) {
       const current = result === "maxConcurrent"
         ? String(manager.getMaxConcurrent())
-        : result === "defaultMaxTurns"
-          ? String(getDefaultMaxTurns() ?? 0)
-          : result === "maxSubagentDepth"
-            ? String(getMaxSubagentDepth())
-            : String(getGraceTurns());
+        : result === "maxConcurrentForeground"
+          ? String(manager.getMaxConcurrentForeground())
+          : result === "defaultMaxTurns"
+            ? String(getDefaultMaxTurns() ?? 0)
+            : result === "maxSubagentDepth"
+              ? String(getMaxSubagentDepth())
+              : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
         ? "Max concurrency (1+)"
-        : result === "defaultMaxTurns"
-          ? "Default max turns (0 = unlimited)"
-          : result === "maxSubagentDepth"
-            ? "Nested depth (0/1 = nesting off)"
-            : "Grace turns (1+)";
+        : result === "maxConcurrentForeground"
+          ? "Max foreground concurrency (0 = unlimited)"
+          : result === "defaultMaxTurns"
+            ? "Default max turns (0 = unlimited)"
+            : result === "maxSubagentDepth"
+              ? "Nested depth (0/1 = nesting off)"
+              : "Grace turns (1+)";
 
       // Loop until user enters a valid integer or cancels (Esc / null).
       // Silently trims whitespace; rejects non-numeric input by re-prompting.
