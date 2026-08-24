@@ -42,7 +42,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/ test/",
     "lint:fix": "biome check --fix src/ test/",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "bench": "vitest bench",
+    "bench:ab": "node test/perf/ab.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
