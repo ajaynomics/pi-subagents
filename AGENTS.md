@@ -27,6 +27,10 @@
 
 - After code changes (not docs), run the full check suite and fix all errors and warnings:
   ```bash
+  npm run check       # lint + typecheck + test (what CI runs)
+  ```
+  The steps individually, when you need to isolate a failure:
+  ```bash
   npm run lint        # biome
   npm run typecheck   # tsc --noEmit
   npm run test        # vitest run
@@ -118,8 +122,7 @@ Before a release:
 - Update `README.md` if user-facing behavior changed (features list, settings, usage).
 - Run the full check suite plus the e2e tests, and fix anything that fails:
   ```bash
-  npm run lint
-  npm run typecheck
+  npm run check                    # lint + typecheck + test
   npm run test:e2e                 # faux/scripted e2e — no network, no keys
   npm run build
   ```

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-24
+
 ### Added
 - **`subagents:rpc:consume` — a cross-extension caller can say it has already shown an agent's result** ([tintinweb/pi-tasks#62](https://github.com/tintinweb/pi-tasks/issues/62) — thanks [@felipe3dfx](https://github.com/felipe3dfx)). `get_subagent_result` suppresses the completion notification for a result it hands back, but it is a tool the parent model calls; an extension that joins an agent on `subagents:completed` and reports the result itself had no way to do the same, so the notification still arrived — after the parent had answered — and cost a turn to dismiss. The new RPC marks a settled agent's result consumed, exactly as the tool does. Running and unknown agents are refused, so a caller cannot silence an agent whose result nobody has read yet. Deliberately outside the `subagents:rpc:ping` version handshake: it is additive and best-effort, and an extension built against protocol v2 simply never calls it.
 - **`showModel` — the model and thinking level on the widget's running rows.** A row reads `Explore  inspect code · sonnet 4.6 · thinking: high · ↻3 · 8.2k token · 4.1s`. Off by default, and the only surface that is gated: the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal. Finished rows and the `◦ N queued` summary are untouched — a fan-out that queues ten agents would otherwise push every finished agent out of the twelve-line widget. Toggle at `/agents → Settings → Show model`; applied live.
