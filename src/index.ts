@@ -648,6 +648,7 @@ export default function (pi: ExtensionAPI) {
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
+  // Documented for callers in docs/rpc.md ("The manager registry").
   //
   // Claim the slot only if it's free: subagent sessions re-activate this
   // extension in the same process (session.bindExtensions in agent-runner.ts),
