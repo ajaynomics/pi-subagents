@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-25
+
 > **⚠️ Breaking — this release requires pi 0.84.0 or newer** (`peerDependencies` moves from `>=0.81.0`). `SubagentWorkflow` needs two host APIs that do not exist below it, and both fail the typecheck rather than degrading quietly — see the `Changed` entry below for which, and why neither was worth reimplementing to hold the old floor. npm flags an older pi at install time.
 
 > **ℹ️ Context cost — a session with workflows on carries ~5k tokens more system prompt.** `SubagentWorkflow`'s description is Claude Code's, ported verbatim — about 22 KB of scripting contract, since a model that has to guess the API writes scripts that fail on the first call — and it sits in the tool spec of every turn, not only the ones that run a workflow. `workflowsEnabled: false` is how to get that context back: the tool is never registered, so none of it reaches the prompt.

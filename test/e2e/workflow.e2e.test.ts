@@ -12,17 +12,20 @@
  * subagent's context contains the prompt the script wrote, then every link in
  * that chain ran — nothing else could have put it there.
  *
- * No network and no keys: the faux backend answers every model call.
+ * No network and no keys: the faux backend answers every model call. Each run
+ * pins `live: false` rather than trusting the env var to leave it alone — the
+ * pre-publish smoke sets PI_E2E_LIVE globally, and every assertion here rests on
+ * a scripted `SubagentWorkflow` call a real model has no reason to emit.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxText, fauxToolCall } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { encodeCwd } from "../../src/output-file.js";
 import { readJournal } from "../../src/workflow/journal.js";
-import { runPrintMode } from "../helpers/print-mode-runner.js";
+import { runPrintMode, toolCallsNamed, toolResultsNamed } from "../helpers/print-mode-runner.js";
 
 /**
  * A project directory with workflows switched on.
@@ -97,6 +100,7 @@ describe("Workflow end to end", () => {
       prompt: "run the workflow",
       cwd,
       maxModelCalls: 32,
+      live: false, // scripted on purpose: a real model would not emit the tool call
       respond: context => {
         const isParent = (context.tools ?? []).some(t => t.name === "SubagentWorkflow");
         if (!isParent) {
@@ -180,6 +184,7 @@ describe("Workflow end to end", () => {
       prompt: "run the saved workflow",
       cwd,
       maxModelCalls: 32,
+      live: false, // scripted on purpose: a real model would not emit the tool call
       respond: context => {
         const isParent = (context.tools ?? []).some(t => t.name === "SubagentWorkflow");
         if (!isParent) {
@@ -227,6 +232,7 @@ describe("Workflow end to end", () => {
       prompt: "run the broken workflow",
       cwd: workflowProject(),
       maxModelCalls: 12,
+      live: false, // scripted on purpose: a real model would not emit the tool call
       respond: context => {
         const isParent = (context.tools ?? []).some(t => t.name === "SubagentWorkflow");
         if (!isParent) {
@@ -251,4 +257,199 @@ describe("Workflow end to end", () => {
       await run.dispose?.();
     }
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Opt-in real-LLM smoke — the same chain, with nothing scripted.
+// ---------------------------------------------------------------------------
+//
+// The suite above pins `live: false` because its assertions rest on a
+// `SubagentWorkflow` call the harness emits itself. That buys determinism at the
+// cost of the one link a faux backend cannot stand in for: whether a real model,
+// handed the tool description, actually *calls* the thing — and whether a real
+// provider can answer a schema-bearing child under constrained sampling. Both
+// are pure prompt/provider behaviour, invisible to every test that puts the call
+// there by hand.
+//
+// SMOKE, not strict assertions, in the same spirit as the live block in
+// test/subagents-print-mode-e2e.test.ts: the script is handed to the model
+// verbatim so the variable under test is the *dispatch*, not the model's ability
+// to author JavaScript from memory. What is asserted is what a real run must
+// leave behind — a tool call carrying the right parameter, a launch envelope,
+// and a journal on disk whose recorded answers came from real child sessions.
+const LIVE = /^(1|true|yes)$/i.test(process.env.PI_E2E_LIVE ?? "");
+
+// A workflow turn is a parent turn plus one or more full child sessions run
+// back to back, so it needs materially more room than a single live spawn.
+const LIVE_TIMEOUT = 180_000;
+// The runner's own guard should fire before vitest's: it aborts the session and
+// its children with a descriptive error, where a vitest timeout leaks both.
+const LIVE_VITEST_TIMEOUT = LIVE_TIMEOUT + 60_000;
+// The run is dispatched in the background, so the parent turn can end while the
+// script is still going. Wait on the journal, not on the turn.
+const LIVE_SETTLE_TIMEOUT = 150_000;
+
+/** Every journal entry the run left behind, across whatever journals it wrote. */
+const entriesFor = (cwd: string) => journalsFor(cwd).flatMap(path => readJournal(path));
+
+describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
+  const dirs: string[] = [];
+  let run: Awaited<ReturnType<typeof runPrintMode>> | undefined;
+
+  afterEach(async () => {
+    await run?.dispose?.();
+    run = undefined;
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A project with workflows on, registered for cleanup. */
+  const liveProject = () => {
+    const dir = workflowProject();
+    dirs.push(dir);
+    return dir;
+  };
+
+  it(
+    "a real model runs a saved workflow by name, and its agent reaches a real session",
+    async () => {
+      const cwd = liveProject();
+      mkdirSync(join(cwd, ".pi", "workflows"), { recursive: true });
+      writeFileSync(
+        join(cwd, ".pi", "workflows", "live-smoke.js"),
+        [
+          'export const meta = { name: "live-smoke", description: "one agent, one token", phases: [{ title: "Smoke" }] };',
+          'phase("Smoke");',
+          'const answer = await agent("Reply with exactly the token WF_LIVE_OK and nothing else.", { label: "echo" });',
+          "return answer;",
+        ].join("\n"),
+      );
+
+      run = await runPrintMode({
+        prompt:
+          'Use the SubagentWorkflow tool to run the saved workflow called "live-smoke". ' +
+          "Pass it as the `name` parameter — do not write a script of your own. " +
+          "Then tell me the task id it returned.",
+        cwd,
+        timeoutMs: LIVE_TIMEOUT,
+      });
+
+      // The model reached for the tool rather than narrating that it would.
+      const calls = toolCallsNamed(run.parentSession, "SubagentWorkflow");
+      expect(calls.length, "the model never called SubagentWorkflow").toBeGreaterThan(0);
+      // …by name, which is the resolution path this test is about.
+      expect(calls.some(c => c.name === "live-smoke")).toBe(true);
+      // …and it launched rather than being rejected.
+      expect(toolResultsNamed(run.parentSession, "SubagentWorkflow").join("\n")).toContain("Task ID");
+
+      // The run is detached, so the evidence is on disk: a journal entry means a
+      // real child session ran the script's prompt and answered it.
+      const settled = await waitFor(
+        () => entriesFor(cwd).some(entry => entry.ok),
+        LIVE_SETTLE_TIMEOUT,
+      );
+      const recorded = entriesFor(cwd);
+      expect(settled, `journal entries: ${JSON.stringify(recorded)}`).toBe(true);
+      expect(recorded.map(entry => entry.text ?? "").join("\n")).toMatch(/WF_LIVE_OK/i);
+    },
+    LIVE_VITEST_TIMEOUT,
+  );
+
+  it(
+    "a real model dispatches an inline script, and its parallel agents both run",
+    async () => {
+      // Handed to the model verbatim: what is under test is that a real model
+      // routes a script through the `script` parameter and that the worker runs
+      // it, not whether it can recall the API unaided.
+      const script = [
+        'export const meta = { name: "live-fanout", description: "two agents", phases: [{ title: "Work" }] };',
+        'phase("Work");',
+        "const results = await parallel([",
+        '  () => agent("Reply with exactly the token WF_ONE_OK and nothing else.", { label: "one" }),',
+        '  () => agent("Reply with exactly the token WF_TWO_OK and nothing else.", { label: "two" }),',
+        "]);",
+        "return results;",
+      ].join("\n");
+
+      const cwd = liveProject();
+      run = await runPrintMode({
+        prompt: [
+          "Call the SubagentWorkflow tool once, passing EXACTLY the following script as the",
+          "`script` parameter. Do not modify it, do not summarize it, and do not use `name`.",
+          "Then tell me the task id it returned.",
+          "",
+          script,
+        ].join("\n"),
+        cwd,
+        timeoutMs: LIVE_TIMEOUT,
+      });
+
+      const calls = toolCallsNamed(run.parentSession, "SubagentWorkflow");
+      expect(calls.length, "the model never called SubagentWorkflow").toBeGreaterThan(0);
+      // The inline path, not the saved-name one.
+      expect(calls.some(c => typeof c.script === "string" && String(c.script).includes("live-fanout"))).toBe(true);
+      expect(toolResultsNamed(run.parentSession, "SubagentWorkflow").join("\n")).toContain("Task ID");
+
+      // Both fan-out agents settled. Asserted on the markers rather than on a
+      // count: a live model may retry the call, and a second run would journal
+      // its own entries alongside the first.
+      const bothRan = await waitFor(() => {
+        const text = entriesFor(cwd).map(entry => entry.text ?? "").join("\n");
+        return /WF_ONE_OK/i.test(text) && /WF_TWO_OK/i.test(text);
+      }, LIVE_SETTLE_TIMEOUT);
+      const recorded = entriesFor(cwd);
+      expect(bothRan, `journal entries: ${JSON.stringify(recorded)}`).toBe(true);
+      expect(recorded.every(entry => entry.ok)).toBe(true);
+    },
+    LIVE_VITEST_TIMEOUT,
+  );
+
+  it(
+    "a schema-bearing agent answers through StructuredOutput against a real provider",
+    async () => {
+      // The one path a faux backend genuinely cannot stand in for. `schema`
+      // rests on `constrainedSampling` reaching the provider's own constrained
+      // decoding, plus a description, a guideline and host-side validation
+      // behind it — a faux model answers because the harness told it to, so
+      // nothing below the tool call is exercised there.
+      const script = [
+        'export const meta = { name: "live-schema", description: "one structured answer" };',
+        "const picked = await agent(",
+        '  "Pick the fruit named in this sentence: the banana is yellow. Answer through the StructuredOutput tool.",',
+        '  { label: "pick", schema: { type: "object", properties: { fruit: { type: "string" } }, required: ["fruit"] } },',
+        ");",
+        "return picked.fruit;",
+      ].join("\n");
+
+      const cwd = liveProject();
+      run = await runPrintMode({
+        prompt: [
+          "Call the SubagentWorkflow tool once, passing EXACTLY the following script as the",
+          "`script` parameter. Do not modify it. Then tell me the task id it returned.",
+          "",
+          script,
+        ].join("\n"),
+        cwd,
+        timeoutMs: LIVE_TIMEOUT,
+      });
+
+      expect(toolCallsNamed(run.parentSession, "SubagentWorkflow").length).toBeGreaterThan(0);
+      expect(toolResultsNamed(run.parentSession, "SubagentWorkflow").join("\n")).toContain("Task ID");
+
+      const settled = await waitFor(
+        () => entriesFor(cwd).some(entry => entry.ok && (entry.text ?? "").trim().startsWith("{")),
+        LIVE_SETTLE_TIMEOUT,
+      );
+      const recorded = entriesFor(cwd);
+      expect(settled, `journal entries: ${JSON.stringify(recorded)}`).toBe(true);
+
+      // The journal records the validated payload, not prose — `text` is
+      // `record.structuredJson ?? record.result`, so JSON here means the
+      // StructuredOutput path answered and validation passed.
+      const structured = recorded.find(entry => (entry.text ?? "").trim().startsWith("{"));
+      const payload = JSON.parse(String(structured?.text)) as { fruit?: unknown };
+      expect(typeof payload.fruit).toBe("string");
+      expect(String(payload.fruit)).toMatch(/banana/i);
+    },
+    LIVE_VITEST_TIMEOUT,
+  );
 });
