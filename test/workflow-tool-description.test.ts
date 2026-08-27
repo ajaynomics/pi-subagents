@@ -152,6 +152,7 @@ describe("rendering", () => {
     // A bare `${...}` in the .ts literal would interpolate at module load and
     // reach the model as a value (or throw), not as the example text.
     expect(description).not.toContain("[object Object]");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal placeholder is the subject under test
     expect(description).toContain("${f.title}");
   });
 });
