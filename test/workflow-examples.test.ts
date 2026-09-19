@@ -105,6 +105,14 @@ function stubHost(options: { gateFailsFor?: string[] } = {}): {
         if (label === "scan") {
           return { ok: true, text: JSON.stringify({ files: ["a.ts", "b.ts"] }), outputTokens: 10 };
         }
+        // decompose.js: one level of split, then the leaves do the work.
+        if (label === "split") {
+          return {
+            ok: true,
+            text: JSON.stringify({ subtasks: ["part-a", "part-b"] }),
+            outputTokens: 10,
+          };
+        }
         // Deliberately invalid: a new schema-bearing example with an unhandled
         // label fails validation here rather than passing on an empty object.
         return { ok: true, text: "{}", outputTokens: 10 };
@@ -138,8 +146,10 @@ function stubHost(options: { gateFailsFor?: string[] } = {}): {
       const name = ref.name;
       if (name === undefined) return { ok: false, message: "only `name` refs are stubbed" };
       const file = childFiles.find(child => child === `${name}.js`);
-      if (file === undefined) return { ok: false, message: `no child workflow "${name}"` };
-      return { ok: true, script: readExample(LIB_DIR, file) };
+      if (file !== undefined) return { ok: true, script: readExample(LIB_DIR, file) };
+      // Whitelist the decompose self-reference so a typo'd name still throws like prod.
+      if (name === "decompose") return { ok: true, script: readExample(EXAMPLES_DIR, "decompose.js") };
+      return { ok: false, message: `no child workflow "${name}"` };
     },
   };
   return { host, spawns };
@@ -153,6 +163,7 @@ describe("shipped example workflows", () => {
     // docs/workflows.md has a row per file; a deletion should break this first.
     expect(exampleFiles).toEqual([
       "compose.js",
+      "decompose.js",
       "fan-out-audit.js",
       "gated-fix.js",
       "review-panel.js",
@@ -237,6 +248,30 @@ describe("shipped example workflows", () => {
       // The child's agent counts toward the parent run — they share the counter.
       expect(result.agentCount).toBe(2);
       expect(result.value).toMatchObject({ ok: true, count: 2 });
+    });
+
+    it("decompose splits once, then works each part in a nested run", async () => {
+      const { host } = stubHost();
+      const result = await runExample("decompose.js", host);
+
+      // 1 split + 2 leaves, each in a nested workflow() of the same file.
+      expect(result.error).toBeUndefined();
+      expect(result.agentCount).toBe(3);
+      expect(result.value).toMatchObject({
+        task: "audit src/",
+        subtasks: ["part-a", "part-b"],
+      });
+      const value = result.value as {
+        subtasks: string[];
+        results: { task: string; subtasks: string[]; results: { task: string; result: string }[] }[];
+      };
+      expect(value.results.map(entry => entry.task).sort()).toEqual(["part-a", "part-b"]);
+      for (const entry of value.results) {
+        expect(entry.subtasks).toEqual([]);
+        expect(entry.results).toHaveLength(1);
+        expect(entry.results[0].task).toBe(entry.task);
+        expect(entry.results[0].result).toBe(`ok:work:${entry.task}`);
+      }
     });
 
     it("gated-fix passes straight through when the gate is happy", async () => {

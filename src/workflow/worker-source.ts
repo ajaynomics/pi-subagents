@@ -74,6 +74,7 @@ const vm = require("node:vm");
 
 const port = parentPort;
 const ITEM_CAP = workerData.itemCap;
+const MAX_DEPTH = workerData.maxWorkflowDepth;
 const PRELUDE = ${JSON.stringify(DETERMINISM_PRELUDE)};
 
 /* ------------------------------------------------------------------ *
@@ -405,14 +406,16 @@ let nextPhaseIndex = 0;
  * must NOT share is ambient phase state, so that lives here and the child's
  * globals are closures over its own scope.
  */
-function makeScope(name, depth) {
+function makeScope(name, depth, parentPrefix) {
+  const base = parentPrefix === undefined ? "" : parentPrefix;
   const scope = {
     name: name,
     depth: depth,
     // Prefixed into every phase title the child defines, which is the whole of
     // how a nested run reads as its own group in the progress tree — no new
-    // entry type, no renderer change.
-    prefix: name === undefined ? "" : "\u25b8 " + name,
+    // entry type, no renderer change. Chained, so a grandchild reads as
+    // ▸ outer › inner rather than losing its parent.
+    prefix: name === undefined ? base : (base === "" ? "\u25b8 " + name : base + " \u203a " + name),
     ambientPhaseIndex: undefined,
     ambientPhaseTitle: undefined,
     phaseIndexByTitle: new Map(),
@@ -684,18 +687,12 @@ async function pipeline(items, ...stages) {
  * budget without any of them being passed anywhere: there is only ever one of
  * each. What it does not share is ambient phase state, which lives on the scope.
  *
- * One level only, as in Claude Code. The child's \`workflow\` is present and
- * throws rather than absent, so the error names the limit instead of reading
- * \`workflow is not defined\`.
+ * Nesting is bounded by maxWorkflowDepth (default 6). The child's \`workflow\` is
+ * present and throws rather than absent, so the error names the limit instead of
+ * reading \`workflow is not defined\`.
  */
 async function workflowIn(scope, nameOrRef, args) {
   const frame = currentFrame();
-  if (scope.depth > 0) {
-    throw new Error(
-      "workflow() cannot be nested more than one level deep — you are already inside the workflow '" +
-        scope.name + "'. Call the agents inline instead."
-    );
-  }
 
   let ref;
   if (typeof nameOrRef === "string") {
@@ -713,6 +710,17 @@ async function workflowIn(scope, nameOrRef, args) {
   }
 
   const label = ref.name !== undefined ? ref.name : ref.scriptPath;
+  // Deliberate order: parse → depth → load → boundary. The ref parses first so a malformed ref throws the
+  // ref error even past the limit, while a valid-but-unknown name throws the depth error before the load; depth also
+  // stays ahead of the args boundary check below — the limit is the outer gate, boundary checks the payload of a
+  // call that is allowed to happen.
+  if (scope.depth >= MAX_DEPTH) {
+    const where = scope.name === undefined ? "the root workflow" : "the workflow '" + scope.name + "'";
+    throw new Error(
+      'workflow("' + label + '"): cannot nest ' + where + ' deeper than ' + MAX_DEPTH +
+        ' levels (maxWorkflowDepth). Call the agents inline instead.'
+    );
+  }
   if (args !== undefined) checkBoundary(args, 'workflow("' + label + '") args');
 
   if (nestedCount >= workerData.nestedCap) {
@@ -738,7 +746,7 @@ async function workflowIn(scope, nameOrRef, args) {
     throw new Error('workflow("' + label + '"): ' + describe(error));
   }
 
-  const child = makeScope(loaded.name, scope.depth + 1);
+  const child = makeScope(loaded.name, scope.depth + 1, scope.prefix);
   // The child's own group, defined before its first agent so a child that never
   // calls phase() still reads as its own section rather than falling into the
   // parent's un-phased bucket.

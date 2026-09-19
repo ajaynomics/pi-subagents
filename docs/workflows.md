@@ -269,9 +269,9 @@ Prefer `pipeline` unless a stage genuinely needs every prior result *together* �
 
 Runs a saved workflow inline and returns its value. Pass a name, or `{ scriptPath }`. `args` becomes the child's `args` global.
 
-The child runs in the *same* worker and vm context under its own globals, so it shares this run's concurrency cap, agent counter, abort signal, journal and budget by construction — its agents are simply this run's agents, controllable from the same inspector. What it does not share is phase state: the child's phases render as their own `▸ <name>` group.
+The child runs in the *same* worker and vm context under its own globals, so it shares this run's concurrency cap, agent counter, abort signal, journal and budget by construction — its agents are simply this run's agents, controllable from the same inspector. What it does not share is phase state: the child's phases render chained under its ancestors, so an agent in workflow `a` nested in `b` files under `▸ b › a › phase`.
 
-**One level only** — `workflow()` inside a child throws saying so. An unknown name, an unreadable path, a child carrying no `meta`, or a child that will not parse all throw into the calling script, so `try`/`catch` if you want to handle them. Capped at 256 nested calls per run.
+Nesting is bounded by `maxWorkflowDepth` (default 6; root is depth 0, so `1` allows exactly one child level) — a `workflow()` past that depth throws naming the limit and the workflow, so `try`/`catch` if you want to handle it. An unknown name, an unreadable path, a child carrying no `meta`, or a child that will not parse all throw into the calling script the same way. Capped at 256 nested calls per run.
 
 ### `phase()`, `log()`, `args`, `budget`
 
@@ -298,6 +298,7 @@ The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only
 | Agents per run, total | 1000 |
 | Items per `parallel`/`pipeline` **call** | 4096 |
 | Nested `workflow()` calls per run | 256 |
+| `workflow()` nesting depth | 6 (`maxWorkflowDepth`) |
 | Script length | 512 KiB |
 
 These are three different things and are easy to conflate: 1000 is a budget for the whole run, the concurrency figure is how many run *simultaneously*, and 4096 is per call rather than per run. Excess items queue rather than melting the machine.
@@ -413,7 +414,7 @@ The sandbox is a determinism and accident boundary, not a defence against a deli
 
 This is a port of Claude Code's `Workflow` tool down to its state model, so **a script written for Claude Code runs here unchanged.** `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
 
-Identical: `agent()`, `pipeline()`, `parallel()`, `workflow()`, `phase()`, `log()`, `args`, `budget`; the `meta` block; `schema` returning a validated object; one-level `workflow()` nesting; the determinism throws.
+Identical: `agent()`, `pipeline()`, `parallel()`, `workflow()`, `phase()`, `log()`, `args`, `budget`; the `meta` block; `schema` returning a validated object; the determinism throws.
 
 Different:
 
@@ -435,5 +436,6 @@ Every file below is executed by `test/workflow-examples.test.ts` against a stub 
 | [`gated-fix.js`](../examples/workflows/gated-fix.js) | `gate`, `isolation: "worktree"`, `resume` retry loop | Needs a real test command |
 | [`review-panel.js`](../examples/workflows/review-panel.js) | An earned `parallel` barrier, `effort` tiering, `model` | Yes |
 | [`compose.js`](../examples/workflows/compose.js) | `workflow()` nesting and `args` plumbing | Needs `lib/count-child.js` saved |
+| [`decompose.js`](../examples/workflows/decompose.js) | Recursive `workflow()` self-nesting with `depth`/`fanout` args | Yes |
 
 Copy one into `.pi/workflows/` to make it yours.

@@ -1264,16 +1264,89 @@ describe("nested workflow()", () => {
     expect(nested?.phaseTitle).toBe("▸ audit › Scan");
   });
 
-  it("refuses to nest more than one level, by name", async () => {
+  it("nests three levels deep and returns the innermost value", async () => {
+    const stub = nestingHost({
+      lvl1: child("lvl1", "phase('Top'); return await workflow('lvl2');"),
+      lvl2: child("lvl2", "phase('Mid'); return await workflow('lvl3');"),
+      lvl3: child("lvl3", "phase('Leaf'); return await agent('deep-agent');"),
+    });
+    const result = await run("return await workflow('lvl1');", { host: stub.host });
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toBe("ok:deep-agent");
+    expect(result.agentCount).toBe(1);
+  });
+
+  it("throws past the depth limit, naming the limit and the workflow", async () => {
     const stub = nestingHost({
       outer: child("outer", "return await workflow('inner');"),
       inner: child("inner", "return 1;"),
     });
     const result = await run("try { await workflow('outer'); return 'no throw'; } "
-      + "catch (error) { return error.message; }", { host: stub.host });
+      + "catch (error) { return error.message; }", { host: stub.host, maxWorkflowDepth: 1 });
 
-    expect(String(result.value)).toMatch(/cannot be nested more than one level/);
+    expect(String(result.value)).toMatch(/deeper than 1 levels \(maxWorkflowDepth\)/);
     expect(String(result.value)).toContain("outer");
+    expect(String(result.value)).toContain("inner");
+  });
+
+  it("honors the default depth of 6 for the same chain", async () => {
+    const stub = nestingHost({
+      outer: child("outer", "return await workflow('inner');"),
+      inner: child("inner", "return 'from the child';"),
+    });
+    const result = await run("return await workflow('outer');", { host: stub.host });
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toBe("from the child");
+  });
+
+  it("chains phase prefixes across two levels", async () => {
+    const stub = nestingHost({
+      mid: child("mid", "return await workflow('leaf');"),
+      leaf: child("leaf", "phase('Leaf'); await agent('deep'); return 1;"),
+    });
+    const result = await run("return await workflow('mid');", { host: stub.host });
+
+    const nested = agentEntries(result.progress).find(entry => entry.label === "deep");
+    expect(nested?.phaseTitle).toBe("▸ mid › leaf › Leaf");
+  });
+
+  it("folds a past-limit workflow() in parallel to null without touching siblings", async () => {
+    const stub = nestingHost({ audit: child("audit", "return 'from the child';") });
+    const result = await run("return await parallel([() => workflow('audit'), () => agent('sibling')]);", {
+      host: stub.host,
+      maxWorkflowDepth: 0,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual([null, "ok:sibling"]);
+  });
+
+  it("reports a malformed ref even past the depth limit", async () => {
+    const stub = nestingHost({ outer: child("outer", "return await workflow('');") });
+    const result = await run("try { await workflow('outer'); return 'no throw'; } "
+      + "catch (error) { return error.message; }", { host: stub.host, maxWorkflowDepth: 1 });
+
+    expect(String(result.value)).toMatch(/non-empty name/);
+    expect(String(result.value)).not.toMatch(/deeper than/);
+  });
+
+  it("reports the depth limit before loading an unknown name", async () => {
+    const stub = nestingHost({ outer: child("outer", "return await workflow('nope-missing');") });
+    const result = await run("try { await workflow('outer'); return 'no throw'; } "
+      + "catch (error) { return error.message; }", { host: stub.host, maxWorkflowDepth: 1 });
+
+    expect(String(result.value)).toMatch(/deeper than 1 levels \(maxWorkflowDepth\)/);
+  });
+
+  it("reports depth before the args boundary when both fail", async () => {
+    const stub = nestingHost({ audit: child("audit", "return 1;") });
+    const result = await run("const o = {}; o.self = o; try { await workflow('audit', o); return 'no throw'; } "
+      + "catch (error) { return error.message; }", { host: stub.host, maxWorkflowDepth: 0 });
+
+    expect(String(result.value)).toMatch(/deeper than 0 levels \(maxWorkflowDepth\)/);
+    expect(String(result.value)).not.toMatch(/circular/i);
   });
 
   it("lets a script catch an unknown name", async () => {
