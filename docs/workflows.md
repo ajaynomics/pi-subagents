@@ -99,15 +99,17 @@ Open the path from the `Script:` line, change it, and ask the model to run it ag
 
 Re-running normally re-pays for every agent. `resumeFromRunId` avoids that:
 
-> Its unchanged leading `agent()` calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live.
+> Unchanged `agent()` calls return their recorded results instantly; a changed or failed call, and everything downstream of it, runs live.
 
-Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`, and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed.
+Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`. A call is identified by **where it sits in the run**, not by when it happened to finish: the top level of the script is one chain, and so is each `parallel()` thunk, each `pipeline()` item's whole stage chain, and each nested `workflow()` body. Within a chain the script's own code fixes the order, so the same script re-run asks for the same work in the same places. A call replays when the journal has that place, the recorded call succeeded, and nothing about it changed — prompt, label, model, agent type, effort, isolation, gate or schema.
+
+A change invalidates the chain it is in, and the chains nested inside it, from that point on: a recorded answer downstream of an edit was produced under conditions that no longer exist. Sibling chains keep their caches, so editing one `pipeline()` item's prompt re-runs that item and leaves the other thirty-nine alone. This is also what makes an out-of-order pipeline replay at all — with items overlapping, which agent finishes first varies run to run, and identifying calls by arrival order used to throw away every cache hit after the first item that overtook another.
 
 Four things it will not do:
 
 - **Cross sessions.** The journal is keyed to the session that wrote it. Restart pi and the run id is dead — you get `No workflow run "<id>" in this session.`
 - **Resume a live run.** Stop it from `/agents → Workflows` first; while it is running you get `Workflow "<id>" is still running.`
-- **Replay a failure.** A journaled failure ends the prefix, so resuming a run that died at agent 5 retries exactly agent 5. That is the point.
+- **Replay a failure.** A journaled failure is never replayed, so resuming a run that died at agent 5 retries exactly agent 5 and re-runs what followed it in that chain. That is the point.
 - **Replay a run that used `agent({ resume })` at all.** A replayed agent is text from a file rather than a live child, so there would be no conversation left for a later `resume` to continue.
 
 Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, re-runs that run's own script.

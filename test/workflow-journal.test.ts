@@ -6,9 +6,9 @@
  *   - a resume must not re-pay for work the previous run finished, and
  *   - it must never hand a script an answer produced under other conditions.
  *
- * The prefix rule is what reconciles them, so most of these tests are about
- * where the prefix *ends* — a changed prompt, a recorded failure, a gap — and
- * prove that everything from there on is spawned for real.
+ * Causal identity is what reconciles them, so most of these tests are about
+ * where reuse *stops* — a changed prompt, a recorded failure, a chain whose
+ * upstream moved — and prove that everything downstream is spawned for real.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -81,14 +81,14 @@ describe("journal files", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "wf-journal-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-  it("round-trips appended entries in position order", () => {
+  it("round-trips appended entries in arrival order", () => {
     const path = join(dir, "run.jsonl");
-    appendJournal(path, { index: 1, key: "k1", ok: true, text: "second" });
-    appendJournal(path, { index: 0, key: "k0", ok: true, text: "first" });
+    appendJournal(path, { path: "#1", index: 1, key: "k1", ok: true, text: "second" });
+    appendJournal(path, { path: "#0", index: 0, key: "k0", ok: true, text: "first" });
 
     expect(readJournal(path)).toEqual([
-      { index: 0, key: "k0", ok: true, text: "first" },
-      { index: 1, key: "k1", ok: true, text: "second" },
+      { path: "#0", index: 0, key: "k0", ok: true, text: "first" },
+      { path: "#1", index: 1, key: "k1", ok: true, text: "second" },
     ]);
   });
 
@@ -100,15 +100,21 @@ describe("journal files", () => {
     // The file is appended to while agents settle, so a killed run routinely
     // leaves a half-written line. Everything before it is still good.
     const path = join(dir, "torn.jsonl");
-    appendJournal(path, { index: 0, key: "k0", ok: true, text: "kept" });
-    writeFileSync(path, `${readFileSync(path, "utf-8")}{"index":1,"key":"k1"`, "utf-8");
+    appendJournal(path, { path: "#0", index: 0, key: "k0", ok: true, text: "kept" });
+    writeFileSync(path, `${readFileSync(path, "utf-8")}{"path":"#1","index":1,"key":"k1"`, "utf-8");
 
-    expect(readJournal(path)).toEqual([{ index: 0, key: "k0", ok: true, text: "kept" }]);
+    expect(readJournal(path)).toEqual([{ path: "#0", index: 0, key: "k0", ok: true, text: "kept" }]);
   });
 
   it("drops lines that are JSON but not entries", () => {
     const path = join(dir, "junk.jsonl");
-    writeFileSync(path, '{"index":"one","key":"k","ok":true}\n[]\nnull\n', "utf-8");
+    // Including an entry in the old, path-less format: identity is the path now,
+    // so a journal written before it cannot be replayed against this run.
+    writeFileSync(
+      path,
+      '{"path":"#0","index":"one","key":"k","ok":true}\n{"index":0,"key":"k","ok":true}\n[]\nnull\n',
+      "utf-8",
+    );
     expect(readJournal(path)).toEqual([]);
   });
 });
@@ -126,8 +132,10 @@ describe("replay", () => {
     expect(journal.entries).toEqual([
       // Keyed on what the script asked for, not on what the runtime derived —
       // the label here was derived from the prompt, so it is not part of it.
-      { index: 0, key: journalKey({ prompt: "first" }), ok: true, text: "live:first" },
-      { index: 1, key: journalKey({ prompt: "second" }), ok: true, text: "live:second" },
+      // `path` is slot 0 and slot 1 of the root frame: two sequential calls at
+      // the script's top level.
+      { path: "#0", index: 0, key: journalKey({ prompt: "first" }), ok: true, text: "live:first" },
+      { path: "#1", index: 1, key: journalKey({ prompt: "second" }), ok: true, text: "live:second" },
     ]);
   });
 
@@ -157,9 +165,9 @@ describe("replay", () => {
   });
 
   it("stops replaying after a changed call even when a later one still matches", async () => {
-    // The prefix rule: agent 3's recorded answer was produced downstream of an
-    // agent 2 that no longer exists, so reusing it would be reusing a result
-    // from a run that never happened.
+    // Same frame, so the change dirties it: agent 3's recorded answer was
+    // produced downstream of an agent 2 that no longer exists, and reusing it
+    // would be reusing a result from a run that never happened.
     const three = 'await agent("one");\nawait agent("two");\nreturn await agent("three");';
     const first = recorder();
     await run(three, { host: stubHost().host, journal: first });
@@ -179,7 +187,7 @@ describe("replay", () => {
     const failing = stubHost(() => (attempt++ === 1 ? { ok: false, error: "boom" } : { ok: true, text: "fine" }));
     await run(twoAgents, { host: failing.host, journal: first });
 
-    expect(first.entries[1]).toEqual({ index: 1, key: first.entries[1].key, ok: false });
+    expect(first.entries[1]).toEqual({ path: "#1", index: 1, key: first.entries[1].key, ok: false });
 
     const second = stubHost(() => ({ ok: true, text: "retried" }));
     const result = await run(twoAgents, { host: second.host, journal: { entries: first.entries } });
@@ -275,7 +283,7 @@ describe("replay", () => {
 
   it("blames the replay, not the script, when an added resume has no live target", async () => {
     // An edited script can add a `resume` over a journal that has none. The
-    // prefix is intact, so the target really was replayed — and the reader
+    // journal still matched, so the target really was replayed — and the reader
     // must not be sent hunting for a typo that is not there.
     const plain = recorder();
     await run('await agent("first", { label: "a" });\nreturn null;', { host: stubHost().host, journal: plain });
@@ -307,5 +315,281 @@ describe("replay", () => {
 
     expect(result.value).toEqual(["live:a", "live:b", "live:c"]);
     expect(second.calls).toHaveLength(0);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Causal identity
+ *
+ * A call is identified by where it sits in the run's structural tree, not by
+ * when its message reached the host. These are the cases arrival order gets
+ * wrong: concurrent chains that finish in a different order, and a chain whose
+ * sibling changed.
+ * ------------------------------------------------------------------------- */
+
+describe("causal identity", () => {
+  /** A host whose children answer after a per-prompt delay, so the test picks the completion order. */
+  function delayedHost(delays: Record<string, number> = {}) {
+    const prompts: string[] = [];
+    return {
+      prompts,
+      host: {
+        async spawnAgent(request: WorkflowSpawnRequest): Promise<WorkflowSpawnResult> {
+          prompts.push(request.prompt);
+          const wait = delays[request.prompt];
+          if (wait !== undefined) await new Promise<void>(resolve => setTimeout(resolve, wait));
+          return { ok: true, text: `live:${request.prompt}` };
+        },
+        abortAgent() {},
+      },
+    };
+  }
+
+  /** A two-stage pipeline: stage 2's prompt names the original item, not stage 1's answer. */
+  const pipelineScript = (stage1 = '"s1:" + value', stage2 = '"s2:" + item') =>
+    [
+      'return await pipeline(["A", "B"],',
+      `  async (value) => await agent(${stage1}),`,
+      `  async (previous, item) => await agent(${stage2}),`,
+      ");",
+    ].join("\n");
+
+  it("gives one pipeline item's whole stage chain a single frame", async () => {
+    const journal = recorder();
+    await run(pipelineScript(), { host: delayedHost().host, journal, concurrency: 4 });
+
+    // Slot 0 of the root frame is the pipeline; each item is a branch of it (`l:i`),
+    // and the stages take slots 0 and 1 *of that branch* because they run in one
+    // sequential chain.
+    expect(journal.entries.map(entry => entry.path).sort()).toEqual([
+      "/0:l:0#0",
+      "/0:l:0#1",
+      "/0:l:1#0",
+      "/0:l:1#1",
+    ]);
+  });
+
+  it("replays a pipeline whose items finish in the other order", async () => {
+    // Nothing about the script changed; only which agent was slower. Under
+    // arrival-order identity the second run's third call is a different agent
+    // than the journal's third entry, and everything from there runs live.
+    const journal = recorder();
+    const first = delayedHost({ "s1:A": 40 });
+    await run(pipelineScript(), { host: first.host, journal, concurrency: 4 });
+    expect(first.prompts).toEqual(["s1:A", "s1:B", "s2:B", "s2:A"]);
+
+    const second = delayedHost({ "s1:B": 40 });
+    const result = await run(pipelineScript(), {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    expect(result.replayedCount).toBe(4);
+    expect(second.prompts, "an unchanged script must not pay for a different interleaving").toEqual([]);
+  });
+
+  it("runs only the item whose stage changed", async () => {
+    const journal = recorder();
+    await run(pipelineScript(), { host: delayedHost().host, journal, concurrency: 4 });
+
+    const second = delayedHost();
+    const result = await run(pipelineScript('"s1:" + value', 'item === "A" ? "s2:A edited" : "s2:" + item'), {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    // B's chain is a sibling frame, so it keeps its cache in full.
+    expect(second.prompts).toEqual(["s2:A edited"]);
+    expect(result.replayedCount).toBe(3);
+  });
+
+  it("runs the rest of an item's chain when its first stage changed", async () => {
+    const journal = recorder();
+    await run(pipelineScript(), { host: delayedHost().host, journal, concurrency: 4 });
+
+    const second = delayedHost();
+    const result = await run(pipelineScript('value === "A" ? "s1:A edited" : "s1:" + value'), {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    // "s2:A" keys exactly as it did before — it is invalidated because the chain
+    // that feeds it changed, which is the whole reason a frame goes dirty.
+    expect(second.prompts.sort()).toEqual(["s1:A edited", "s2:A"]);
+    expect(result.replayedCount).toBe(2);
+  });
+
+  it("keeps parallel branches independent of each other", async () => {
+    // The edited branch is the *first* one, so the unchanged sibling is decided
+    // after the miss — which is the case a coarser invalidation would get wrong.
+    const fanout = (a: string) =>
+      `return await parallel([() => agent("${a}"), () => agent("p:b")]);`;
+    const journal = recorder();
+    await run(fanout("p:a"), { host: delayedHost().host, journal, concurrency: 4 });
+
+    const second = delayedHost();
+    const result = await run(fanout("p:a edited"), {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    expect(second.prompts).toEqual(["p:a edited"]);
+    expect(result.replayedCount).toBe(1);
+  });
+
+  describe("nested workflow()", () => {
+    const parent = 'await agent("parent-a");\nawait workflow("audit");\nreturn await agent("parent-b");';
+    const childScript = (firstPrompt: string) =>
+      `export const meta = { name: "audit", description: "d" };\nawait agent("${firstPrompt}");\nreturn await agent("child-2");\n`;
+
+    /** The stub host, plus a library a nested `workflow()` can be resolved against. */
+    function nestingHost(child: string) {
+      const stub = delayedHost();
+      return {
+        prompts: stub.prompts,
+        host: {
+          ...stub.host,
+          loadWorkflow: (ref: { name?: string }) =>
+            ref.name === "audit"
+              ? { ok: true as const, script: child }
+              : { ok: false as const, message: `No saved workflow named "${ref.name}".` },
+        },
+      };
+    }
+
+    it("replays parent and child alike when nothing changed", async () => {
+      const journal = recorder();
+      await run(parent, { host: nestingHost(childScript("child-1")).host, journal });
+
+      const second = nestingHost(childScript("child-1"));
+      const result = await run(parent, { host: second.host, journal: { entries: journal.entries } });
+
+      expect(result.replayedCount).toBe(4);
+      expect(second.prompts).toEqual([]);
+    });
+
+    it("keeps a change inside the child out of the parent's chain", async () => {
+      const journal = recorder();
+      await run(parent, { host: nestingHost(childScript("child-1")).host, journal });
+
+      const second = nestingHost(childScript("child-1, edited"));
+      const result = await run(parent, { host: second.host, journal: { entries: journal.entries } });
+
+      // The child body is its own frame: it goes dirty from its first stage on,
+      // and the parent's own calls — including the one *after* the workflow() —
+      // still come back from the journal.
+      expect(second.prompts).toEqual(["child-1, edited", "child-2"]);
+      expect(result.replayedCount).toBe(2);
+    });
+  });
+
+  it("root miss poisons nested frames even when their keys still match", async () => {
+    const firstBody = 'await agent("first");\nreturn await parallel([() => agent("a"), () => agent("b")]);';
+    const journal = recorder();
+    await run(firstBody, { host: delayedHost().host, journal, concurrency: 4 });
+
+    const second = delayedHost();
+    const edited = 'await agent("first, edited");\nreturn await parallel([() => agent("a"), () => agent("b")]);';
+    const result = await run(edited, {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    // The root frame went dirty at #0, so the parallel branches miss despite
+    // matching keys — poison degrades to misses, never wrong answers.
+    expect(second.prompts.sort()).toEqual(["a", "b", "first, edited"]);
+    expect(result.replayedCount).toBe(0);
+  });
+
+  it("replays two parallel siblings while an added third thunk runs live", async () => {
+    const fanout = (extra: string) =>
+      `return await parallel([() => agent("a"), () => agent("b")${extra}]);`;
+    const journal = recorder();
+    await run(fanout(""), { host: delayedHost().host, journal, concurrency: 4 });
+
+    const second = delayedHost();
+    const result = await run(fanout(', () => agent("c")'), {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    expect(second.prompts).toEqual(["c"]);
+    expect(result.replayedCount).toBe(2);
+  });
+
+  it("runs both chains live when pipeline items reorder (paths are positional)", async () => {
+    const pipe = (order: string) =>
+      `return await pipeline([${order}], async (value) => await agent("stage:" + value));`;
+    const journal = recorder();
+    await run(pipe('"A", "B"'), { host: delayedHost().host, journal, concurrency: 4 });
+
+    const second = delayedHost();
+    const result = await run(pipe('"B", "A"'), {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+
+    // Keys move with items but paths do not, so both positional chains miss.
+    expect(second.prompts.sort()).toEqual(["stage:A", "stage:B"]);
+    expect(result.replayedCount).toBe(0);
+  });
+
+  it("keeps a parallel thunk branch frame across a host round trip", async () => {
+    const body = 'return await parallel([async () => {\n  const x = await agent("t0-first");\n  return await agent("t0-second");\n}, () => agent("other")]);';
+    const journal = recorder();
+    await run(body, { host: delayedHost().host, journal, concurrency: 4 });
+
+    // Branch tags distinguish constructs: parallel thunks live under p:i.
+    expect(journal.entries.map((entry) => entry.path).sort()).toEqual([
+      "/0:p:0#0",
+      "/0:p:0#1",
+      "/0:p:1#0",
+    ]);
+
+    const second = delayedHost();
+    const result = await run(body, {
+      host: second.host,
+      journal: { entries: journal.entries },
+      concurrency: 4,
+    });
+    expect(result.replayedCount).toBe(3);
+    expect(second.prompts).toEqual([]);
+  });
+
+  it("parent re-runs via key miss when its prompt depends on workflow() result (upward isolation relies on key)", async () => {
+    const parent = 'const r = await workflow("audit");\nreturn await agent("parent:" + r);';
+    const childScript = (firstPrompt: string) =>
+      `export const meta = { name: "audit", description: "d" };\nreturn await agent("${firstPrompt}");\n`;
+    const makeHost = (child: string) => {
+      const stub = delayedHost();
+      return {
+        prompts: stub.prompts,
+        host: {
+          ...stub.host,
+          loadWorkflow: (ref: { name?: string }) =>
+            ref.name === "audit"
+              ? { ok: true as const, script: child }
+              : { ok: false as const, message: `No saved workflow named "${ref.name}".` },
+        },
+      };
+    };
+
+    const journal = recorder();
+    await run(parent, { host: makeHost(childScript("child-1")).host, journal });
+
+    const second = makeHost(childScript("child-1, edited"));
+    const result = await run(parent, { host: second.host, journal: { entries: journal.entries } });
+
+    // Child change flows upward through the parent prompt key, not through
+    // dirty frames — a static-prompt parent would correctly replay.
+    expect(second.prompts).toEqual(["child-1, edited", "parent:live:child-1, edited"]);
+    expect(result.replayedCount).toBe(0);
   });
 });
