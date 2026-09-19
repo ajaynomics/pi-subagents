@@ -149,7 +149,7 @@ function isFatal(error) {
 const als = new AsyncLocalStorage();
 
 /** The frame a script's top level runs in. */
-const ROOT_FRAME = { path: "", next: 0 };
+const ROOT_FRAME = { path: "", next: 0, adds: 0 };
 
 /**
  * Fallback when the ALS store is lost.
@@ -160,7 +160,7 @@ const ROOT_FRAME = { path: "", next: 0 };
  * match a worker-built path, so it degrades to cache misses, never wrong answers.
  * Do NOT throw: a throw would kill runs that today survive.
  */
-const POISON_FRAME = { path: "\0lost", next: 0 };
+const POISON_FRAME = { path: "\0lost", next: 0, adds: 0 };
 
 function currentFrame() {
   const frame = als.getStore();
@@ -171,12 +171,13 @@ function currentFrame() {
  * The frame branch \`branch\` of the structural call at slot \`slot\` runs in.
  *
  * Branch tags distinguish constructs: \`p:i\` for parallel thunk i, \`l:i\` for
- * pipeline item i, \`w\` for a nested workflow() body.
+ * pipeline item i, \`q:i\` for worklist seed i, \`a:j\` for the j-th add() from
+ * an item frame, \`w\` for a nested workflow() body.
  * Invariant: frame paths never contain # except as the slot separator and are
  * always /-joined — the contract frameOf/chainDirty host-side depend on.
  */
 function childFrame(frame, slot, branch) {
-  return { path: frame.path + "/" + slot + ":" + branch, next: 0 };
+  return { path: frame.path + "/" + slot + ":" + branch, next: 0, adds: 0 };
 }
 
 /* ------------------------------------------------------------------ *
@@ -679,6 +680,131 @@ async function pipeline(items, ...stages) {
 }
 
 /**
+ * A dynamic queue the script drives: \`fn(item, add)\` may enqueue more items
+ * while running; the call resolves when the queue drains.
+ *
+ * Seeds run in \`/k:q:i\` child frames of this call's slot; \`add()\` for the j-th
+ * time from a calling frame enqueues a child extending the calling frame in
+ * \`G.path + "/a:j"\`, where G is the calling frame and j is its per-frame add
+ * counter. Agents inside an item take \`#n\` slots of that item's frame, exactly
+ * like pipeline. Results resolve to \`{ item, result }\` objects sorted by item
+ * path (segment-wise numeric) so reorder cannot change the order. A throwing
+ * item resolves to \`{ item, result: null }\`; a fatal error rejects the whole
+ * call.
+ */
+async function worklist(seeds, fn) {
+  const frame = currentFrame();
+  if (typeof fn !== "function") {
+    throw new Error("worklist(seeds, fn) expects fn to be a function.");
+  }
+  const list = toList(seeds, "worklist(seeds, fn)");
+  const slot = frame.next++;
+  const queue = [];
+  for (let i = 0; i < list.length; i++) {
+    const itemFrame = childFrame(frame, slot, "q:" + i);
+    queue.push({ item: list[i], itemFrame: itemFrame });
+  }
+  const outcomes = [];
+  let total = list.length;
+  let inFlight = 0;
+  let pumping = false;
+  let drained = false;
+  let settledResolve;
+  let settledReject;
+  const drainedPromise = new Promise(function (resolve, reject) {
+    settledResolve = resolve;
+    settledReject = reject;
+  });
+  function finishSorted() {
+    outcomes.sort(function (a, b) {
+      const partsA = a.path.split(/[/#:]/);
+      const partsB = b.path.split(/[/#:]/);
+      const len = partsA.length > partsB.length ? partsA.length : partsB.length;
+      for (let i = 0; i < len; i++) {
+        const x = partsA[i];
+        const y = partsB[i];
+        if (x === y) continue;
+        if (x === undefined) return -1;
+        if (y === undefined) return 1;
+        const xIsNum = /^[0-9]+$/.test(x);
+        const yIsNum = /^[0-9]+$/.test(y);
+        if (xIsNum && yIsNum) {
+          const nx = Number(x);
+          const ny = Number(y);
+          if (nx !== ny) return nx < ny ? -1 : 1;
+        }
+        return x < y ? -1 : 1;
+      }
+      return 0;
+    });
+    const finalResults = [];
+    for (let k = 0; k < outcomes.length; k++) {
+      finalResults.push({ item: outcomes[k].item, result: outcomes[k].result });
+    }
+    return toRealmArray(finalResults);
+  }
+  function pump() {
+    if (drained) return;
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (queue.length > 0) {
+        const entry = queue.shift();
+        inFlight++;
+        runEntry(entry).catch(function (error) {
+          if (!drained) {
+            drained = true;
+            settledReject(error);
+          }
+        });
+      }
+      if (inFlight === 0) {
+        drained = true;
+        settledResolve(finishSorted());
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+  function add(newItem) {
+    if (drained) throw new Error("worklist: cannot add — the worklist already drained.");
+    checkBoundary(newItem, "worklist() item");
+    total++;
+    if (total > ITEM_CAP) {
+      const error = new Error("worklist(seeds, fn) was given " + total + " items, over the limit of " + ITEM_CAP + ".");
+      error.workflowFatal = true;
+      throw error;
+    }
+    const parent = currentFrame();
+    const j = parent.adds++;
+    const path = parent.path + "/a:" + j;
+    queue.push({ item: newItem, itemFrame: { path: path, next: 0, adds: 0 } });
+    pump();
+  }
+  async function runEntry(entry) {
+    try {
+      const result = await als.run(entry.itemFrame, function () {
+        return fn(entry.item, add);
+      });
+      outcomes.push({ item: entry.item, result: result, path: entry.itemFrame.path });
+    } catch (error) {
+      if (isFatal(error)) {
+        if (!drained) {
+          drained = true;
+          settledReject(error);
+        }
+        return;
+      }
+      outcomes.push({ item: entry.item, result: null, path: entry.itemFrame.path });
+    }
+    inFlight--;
+    pump();
+  }
+  pump();
+  return drainedPromise;
+}
+
+/**
  * The \`workflow(nameOrRef, args?)\` global.
  *
  * Runs another workflow inline. The child executes in *this* worker and *this*
@@ -813,6 +939,7 @@ async function main() {
     agent: rootScope.agent,
     parallel: parallel,
     pipeline: pipeline,
+    worklist: worklist,
     phase: rootScope.phase,
     log: rootScope.log,
     workflow: rootScope.workflow,

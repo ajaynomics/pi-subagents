@@ -265,6 +265,14 @@ await parallel(thunks)             // barrier: waits for all of them
 
 Prefer `pipeline` unless a stage genuinely needs every prior result *together* — deduplicating across the whole set, deciding whether to continue at all, or a prompt that compares one result against all the others. Needing to flatten, map or filter is not such a case; do that inside a pipeline stage.
 
+### `worklist(seeds, fn)`
+
+```js
+await worklist(seeds, async (item, add) => ...)   // drains when the queue empties
+```
+
+`worklist` is the queue that grows while it runs. `fn` sees `(item, add)` — call `add(newItem)` to enqueue one more item processed with the same `fn`, then return the item's result. The call resolves when the queue drains: zero in flight and nothing queued. It resolves to `{ item, result }` entries sorted by item path (segment-wise numeric), not insertion order, so a different finish order cannot reorder the return value. An item whose `fn` throws resolves to `{ item, result: null }` — filter before using the results; only a fatal run error (a cap breach, a past-limit `workflow()`, an abort) rejects the whole `worklist()`. Calling `add()` after the queue drained throws naming the drain. Seeds plus added items share the 4096-per-call item cap with `parallel`/`pipeline`. Path stability is the point: seeds run in `/k:q:i` frames and each `add()` extends the calling frame as `/a:j`, so an unchanged re-run replays even when items finish in a different order.
+
 ### `workflow(nameOrRef, args?)`
 
 Runs a saved workflow inline and returns its value. Pass a name, or `{ scriptPath }`. `args` becomes the child's `args` global.

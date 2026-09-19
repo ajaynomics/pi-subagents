@@ -306,6 +306,270 @@ describe("pipeline", () => {
   });
 });
 
+describe("worklist", () => {
+  it("drains and sorts results by item path regardless of finish order", async () => {
+    const { host } = stubHost(async request => {
+      if (request.prompt === "work:b") await sleep(60);
+      return { ok: true, text: `ok:${request.prompt}` };
+    });
+
+    const result = await run(
+      'return await worklist(["b", "a"], async item => await agent("work:" + item));',
+      { host, concurrency: 4 },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual([
+      { item: "b", result: "ok:work:b" },
+      { item: "a", result: "ok:work:a" },
+    ]);
+  });
+
+  it("runs items added during the run in deterministic frames", async () => {
+    const { host } = stubHost();
+    const journal: WorkflowJournalEntry[] = [];
+    const result = await run(
+      [
+        'return await worklist(["root"], async (item, add) => {',
+        '  const text = await agent("work:" + item);',
+        '  if (item === "root") { add("child-a"); add("child-b"); }',
+        '  if (item === "child-b") add("grandchild");',
+        '  return "done:" + item;',
+        "});",
+      ].join("\n"),
+      { host, concurrency: 4, journal: { append: entry => journal.push(entry) } },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual([
+      { item: "root", result: "done:root" },
+      { item: "child-a", result: "done:child-a" },
+      { item: "child-b", result: "done:child-b" },
+      { item: "grandchild", result: "done:grandchild" },
+    ]);
+    expect(journal.map(entry => entry.path).sort()).toEqual([
+      "/0:q:0#0",
+      "/0:q:0/a:0#0",
+      "/0:q:0/a:1#0",
+      "/0:q:0/a:1/a:0#0",
+    ]);
+  });
+
+  it("replays dynamic items without spawning when delays shuffle", async () => {
+    const script = [
+      'return await worklist(["b", "a"], async item => await agent("work:" + item));',
+    ].join("\n");
+    const firstEntries: WorkflowJournalEntry[] = [];
+    const firstDelays: Record<string, number> = { "work:b": 50 };
+    await run(script, {
+      host: stubHost(async request => {
+        const wait = firstDelays[request.prompt];
+        if (wait !== undefined) await sleep(wait);
+        return { ok: true, text: `live:${request.prompt}` };
+      }).host,
+      journal: { append: entry => firstEntries.push(entry) },
+      concurrency: 4,
+    });
+
+    const second = stubHost(async request => {
+      if (request.prompt === "work:a") await sleep(50);
+      return { ok: true, text: `live:${request.prompt}` };
+    });
+    const result = await run(script, {
+      host: second.host,
+      journal: { entries: firstEntries },
+      concurrency: 4,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.replayedCount).toBe(2);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("folds a throwing item to null without touching siblings", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        'return await worklist(["keep", "drop"], async item => {',
+        '  if (item === "drop") throw new Error("item failed");',
+        '  return "done:" + item;',
+        "});",
+      ].join("\n"),
+      { host },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual([
+      { item: "keep", result: "done:keep" },
+      { item: "drop", result: null },
+    ]);
+  });
+
+  it("rejects the whole call when fn throws a fatal error", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      'return await worklist(["a"], async () => await workflow("anything"));',
+      { host, nestedCap: 0 },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("cap of 0 nested");
+  });
+
+  it("rejects seeds over the item cap", async () => {
+    const { host } = stubHost();
+    const result = await run("return await worklist(new Array(5).fill(1), async v => v);", {
+      host,
+      itemCap: 4,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("over the limit of 4");
+  });
+
+  it("resolves empty seeds with zero agents", async () => {
+    const { host, calls } = stubHost();
+    const result = await run("return await worklist([], async v => v);", { host });
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual([]);
+    expect(calls).toHaveLength(0);
+    expect(result.agentCount).toBe(0);
+  });
+
+  it("throws when add is called after the queue drained", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        "let saved;",
+        'const out = await worklist(["a"], async (item, add) => { saved = add; return await agent("w:" + item); });',
+        'try { saved("late"); return "no-throw"; } catch (error) { return error.message; }',
+      ].join("\n"),
+      { host },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(String(result.value)).toMatch(/drained/);
+  });
+
+  it("rejects the whole call when add() grows past the item cap", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        'return await worklist(["a", "b"], async (item, add) => {',
+        '  if (item === "a") { add("c"); add("d"); add("e"); }',
+        '  return "done:" + item;',
+        "});",
+      ].join("\n"),
+      { host, itemCap: 4 },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/over the limit/);
+  });
+
+  it("extends the calling frame when add() runs inside a parallel thunk", async () => {
+    const { host } = stubHost();
+    const journal: WorkflowJournalEntry[] = [];
+    const result = await run(
+      [
+        'return await worklist(["root"], async (item, add) => {',
+        '  const text = await agent("work:" + item);',
+        '  if (item === "root") {',
+        "    await parallel([async () => { add(\"child-via-parallel\"); }]);",
+        "  }",
+        '  return "done:" + item;',
+        "});",
+      ].join("\n"),
+      { host, concurrency: 4, journal: { append: (entry) => journal.push(entry) } },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual([
+      { item: "root", result: "done:root" },
+      { item: "child-via-parallel", result: "done:child-via-parallel" },
+    ]);
+    expect(journal.map((entry) => entry.path).sort()).toEqual(["/0:q:0#0", "/0:q:0/1:p:0/a:0#0"]);
+  });
+
+  it("drains synchronous adds without overflowing the stack", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        "let n = 0;",
+        "const out = await worklist([\"seed\"], (item, add) => {",
+        "  n++;",
+        "  if (n <= 50) add(\"item-\" + n);",
+        "  return \"done:\" + item;",
+        "});",
+        "return { count: out.length, n };",
+      ].join("\n"),
+      { host },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual({ count: 51, n: 51 });
+  });
+
+  it("keeps seed order past nine entries with shuffled completion", async () => {
+    const seeds = Array.from({ length: 12 }, (_, i) => "s" + i);
+    const { host } = stubHost(async (request) => {
+      const n = Number(request.prompt.replace("work:s", ""));
+      const wait = (11 - n) * 5;
+      if (wait > 0) await sleep(wait);
+      return { ok: true, text: `ok:${request.prompt}` };
+    });
+
+    const result = await run(
+      'return await worklist(["s0","s1","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11"], async item => await agent("work:" + item));',
+      { host, concurrency: 4 },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual(seeds.map((s) => ({ item: s, result: `ok:work:${s}` })));
+  });
+
+  it("replays dynamic adds without spawning when delays shuffle", async () => {
+    const script = [
+      'return await worklist(["root", "other"], async (item, add) => {',
+      '  const text = await agent("work:" + item);',
+      '  if (item === "root") { add("child-a"); add("child-b"); }',
+      '  return "done:" + item;',
+      "});",
+    ].join("\n");
+    const firstEntries: WorkflowJournalEntry[] = [];
+    await run(script, {
+      host: stubHost(async (request) => {
+        if (request.prompt === "work:child-a" || request.prompt === "work:child-b") await sleep(50);
+        return { ok: true, text: `live:${request.prompt}` };
+      }).host,
+      journal: { append: (entry) => firstEntries.push(entry) },
+      concurrency: 4,
+    });
+
+    expect(firstEntries.map((entry) => entry.path).sort()).toEqual([
+      "/0:q:0#0",
+      "/0:q:0/a:0#0",
+      "/0:q:0/a:1#0",
+      "/0:q:1#0",
+    ]);
+
+    const second = stubHost(async (request) => {
+      if (request.prompt === "work:root" || request.prompt === "work:other") await sleep(50);
+      return { ok: true, text: `live:${request.prompt}` };
+    });
+    const result = await run(script, {
+      host: second.host,
+      journal: { entries: firstEntries },
+      concurrency: 4,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.replayedCount).toBe(4);
+    expect(second.calls).toHaveLength(0);
+  });
+});
+
 describe("semaphore", () => {
   it("never exceeds the configured concurrency under a large fan-out", async () => {
     let active = 0;

@@ -18,11 +18,14 @@
  * The path is causal, not chronological. A run is a tree of *frames*, where a
  * frame is one sequential chain of script execution: the top level is one, each
  * `parallel()` thunk is one, each `pipeline()` item's whole stage chain is one,
+ * each `worklist()` seed or added item's run of `fn` is one,
  * each nested `workflow()` body is one. Within a frame the script's own code
  * fixes the order, so a per-frame counter is deterministic; concurrency only
  * happens between frames. Paths name that tree: `#k` is slot `k` of a frame,
  * `/k:p:i` is parallel thunk `i` at slot `k`, `/k:l:i` is pipeline item `i` at
- * slot `k`, and `/k:w` is the nested `workflow()` body at slot `k`. Numbering
+ * slot `k`, `/k:q:i` is worklist seed `i` at slot `k`, `/a:j` extends the
+ * calling frame with the j-th `add()` from it, and `/k:w` is the nested
+ * `workflow()` body at slot `k`. Numbering
  * calls by arrival instead would make the identity of a pipeline's agents depend
  * on which sibling item finished first, so an unchanged script re-run would lose
  * most of its cache to nothing more than a different interleaving.
@@ -75,8 +78,10 @@ export interface WorkflowJournalEntry {
    * Where the call sits in the run's structural tree — its identity on replay.
    *
    * `#k` is slot `k` of a frame; `/k:p:i` is parallel thunk `i` at slot `k`,
-   * `/k:l:i` is pipeline item `i` at slot `k`, and `/k:w` is the nested
-   * `workflow()` body at slot `k`. Opaque: compared for equality, and for
+   * `/k:l:i` is pipeline item `i` at slot `k`, `/k:q:i` is worklist seed `i`
+   * at slot `k`, `/a:j` is the j-th `add()` from the calling frame, and `/k:w`
+   * is the nested `workflow()` body at slot `k`. Opaque: compared for
+   * equality, and for
    */
   path: string;
   /**
