@@ -168,6 +168,7 @@ describe("shipped example workflows", () => {
       "gated-fix.js",
       "review-panel.js",
       "structured-findings.js",
+      "worklist-crawl.js",
     ]);
     expect(childFiles).toEqual(["count-child.js"]);
   });
@@ -293,6 +294,20 @@ describe("shipped example workflows", () => {
       // fix (gated, fails) → resume → verify (gated, passes).
       expect(spawns.map(s => s.label)).toEqual(["fix", "verify"]);
       expect(result.agentCount).toBe(3);
+    });
+
+    it("worklist-crawl drains its follow-up and returns path-sorted entries", async () => {
+      const { host } = stubHost();
+      const result = await runExample("worklist-crawl.js", host);
+
+      expect(result.error).toBeUndefined();
+      // 2 seeds + 1 follow-up, one agent per item.
+      expect(result.agentCount).toBe(3);
+      expect(result.value).toEqual([
+        { item: "alpha", result: "ok:crawl:alpha" },
+        { item: "alpha-followup", result: "ok:crawl:alpha-followup" },
+        { item: "beta", result: "ok:crawl:beta" },
+      ]);
     });
   });
 
