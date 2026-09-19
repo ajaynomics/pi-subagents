@@ -485,6 +485,121 @@ describe("causal identity", () => {
       expect(second.prompts).toEqual(["child-1, edited", "child-2"]);
       expect(result.replayedCount).toBe(2);
     });
+
+    it("replays an unchanged grandchild run in full", async () => {
+      const root = 'await agent("parent-a");\nawait workflow("mid");\nreturn await agent("parent-b");';
+      const mid = 'await agent("mid-a");\nawait workflow("leaf");\nreturn await agent("mid-b");';
+      const leaf = (first: string) =>
+        `export const meta = { name: "leaf", description: "d" };\nawait agent("${first}");\nreturn await agent("leaf-b");\n`;
+      const library = (leafScript: string) => ({
+        mid: `export const meta = { name: "mid", description: "d" };\n${mid}\n`,
+        leaf: leafScript,
+      });
+      const serve = (scripts: Record<string, string>) => {
+        const stub = delayedHost();
+        return {
+          prompts: stub.prompts,
+          host: {
+            ...stub.host,
+            loadWorkflow: (ref: { name?: string }) => {
+              const script = ref.name !== undefined ? scripts[ref.name] : undefined;
+              return script !== undefined
+                ? { ok: true as const, script }
+                : { ok: false as const, message: `No saved workflow named "${ref.name}".` };
+            },
+          },
+        };
+      };
+
+      const journal = recorder();
+      await run(root, { host: serve(library(leaf("leaf-a"))).host, journal });
+
+      const second = serve(library(leaf("leaf-a")));
+      const result = await run(root, { host: second.host, journal: { entries: journal.entries } });
+
+      expect(result.replayedCount).toBe(6);
+      expect(second.prompts).toEqual([]);
+    });
+
+    it("a grandchild edit re-runs only that chain onward", async () => {
+      const root = 'await agent("parent-a");\nawait workflow("mid");\nreturn await agent("parent-b");';
+      const mid = 'await agent("mid-a");\nawait workflow("leaf");\nreturn await agent("mid-b");';
+      const leaf = (first: string) =>
+        `export const meta = { name: "leaf", description: "d" };\nawait agent("${first}");\nreturn await agent("leaf-b");\n`;
+      const library = (leafScript: string) => ({
+        mid: `export const meta = { name: "mid", description: "d" };\n${mid}\n`,
+        leaf: leafScript,
+      });
+      const serve = (scripts: Record<string, string>) => {
+        const stub = delayedHost();
+        return {
+          prompts: stub.prompts,
+          host: {
+            ...stub.host,
+            loadWorkflow: (ref: { name?: string }) => {
+              const script = ref.name !== undefined ? scripts[ref.name] : undefined;
+              return script !== undefined
+                ? { ok: true as const, script }
+                : { ok: false as const, message: `No saved workflow named "${ref.name}".` };
+            },
+          },
+        };
+      };
+
+      const journal = recorder();
+      await run(root, { host: serve(library(leaf("leaf-a"))).host, journal });
+
+      const second = serve(library(leaf("leaf-a, edited")));
+      const result = await run(root, { host: second.host, journal: { entries: journal.entries } });
+
+      // The leaf frame goes dirty at its first slot; the mid and root chains keep
+      // their caches, including the calls after the nested workflow() bodies.
+      expect(second.prompts).toEqual(["leaf-a, edited", "leaf-b"]);
+      expect(result.replayedCount).toBe(4);
+    });
+
+    it("keeps recursive fan-out branches on distinct journal paths", async () => {
+      const root =
+        'await agent("split");\nreturn await parallel([() => workflow("leaf"), () => workflow("leaf")]);';
+      const leaf =
+        'export const meta = { name: "leaf", description: "d" };\nreturn await agent("leaf-work");\n';
+      const serve = () => {
+        const stub = delayedHost();
+        return {
+          prompts: stub.prompts,
+          host: {
+            ...stub.host,
+            loadWorkflow: (ref: { name?: string }) =>
+              ref.name === "leaf"
+                ? { ok: true as const, script: leaf }
+                : { ok: false as const, message: `No saved workflow named "${ref.name}".` },
+          },
+        };
+      };
+
+      const journal = recorder();
+      const first = serve();
+      const completed = await run(root, { host: first.host, journal, concurrency: 4 });
+      expect(completed.status).toBe("completed");
+
+      // One root agent, then one agent per workflow branch: the decompose shape.
+      // Branch tags keep the two leaves apart despite identical prompts.
+      expect(journal.entries.map(entry => entry.path).sort()).toEqual([
+        "#0",
+        "/1:p:0/0:w#0",
+        "/1:p:1/0:w#0",
+      ]);
+
+      const second = serve();
+      const result = await run(root, {
+        host: second.host,
+        journal: { entries: journal.entries },
+        concurrency: 4,
+      });
+
+      expect(result.replayedCount).toBe(3);
+      expect(second.prompts).toEqual([]);
+    });
   });
 
   it("root miss poisons nested frames even when their keys still match", async () => {

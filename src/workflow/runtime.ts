@@ -33,6 +33,9 @@ export const WORKFLOW_ITEM_CAP = 4096;
 /** Nested `workflow()` invocations allowed per run. */
 export const WORKFLOW_NESTED_CAP = 256;
 
+/** How deep `workflow()` may nest, counting the first child as depth 1. */
+export const WORKFLOW_MAX_DEPTH = 6;
+
 /** How much of a prompt or result is kept for the UI. */
 const PREVIEW_LENGTH = 200;
 
@@ -295,6 +298,15 @@ export interface RunWorkflowOptions {
    * {@link agentCap}.
    */
   nestedCap?: number;
+  /**
+   * How deep `workflow()` may nest, counting the first child as depth 1.
+   *
+   * The worker throws once a scope at this depth tries to nest again, so
+   * the default of 6 allows six levels of children. Root is depth 0, so
+   * `1` allows exactly one child level. `nestedCap` stays as the
+   * backstop on the total number of nested calls.
+   */
+  maxWorkflowDepth?: number;
   /**
    * Replay and record, for `resumeFromRunId`.
    *
@@ -597,6 +609,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   const { meta, body } = validateScript(script);
   const agentCap = options.agentCap ?? WORKFLOW_AGENT_CAP;
   const itemCap = options.itemCap ?? WORKFLOW_ITEM_CAP;
+  const maxWorkflowDepth = options.maxWorkflowDepth ?? WORKFLOW_MAX_DEPTH;
   const semaphore = new Semaphore(options.concurrency ?? workflowConcurrency());
 
   const progress: WorkflowEntry[] = [];
@@ -754,6 +767,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       argsJson: options.args === undefined ? undefined : JSON.stringify(options.args),
       itemCap,
       nestedCap: options.nestedCap ?? WORKFLOW_NESTED_CAP,
+      maxWorkflowDepth,
     },
   });
 

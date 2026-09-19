@@ -10,7 +10,8 @@
  * controllable from the same inspector. What it does not share is phase state:
  * the child's phases render under their own `▸ count-child` group.
  *
- * Nesting is ONE level deep. A `workflow()` call inside the child throws.
+ * Nesting is bounded by maxWorkflowDepth (default 6) — a `workflow()` past that
+ * depth throws naming the limit and the workflow.
  *
  * Requires `lib/count-child.js` to be resolvable — copy both this file and the
  * child into `.pi/workflows/` (the child as `count-child.js`) before running it
