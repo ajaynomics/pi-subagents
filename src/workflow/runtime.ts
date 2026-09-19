@@ -429,6 +429,13 @@ class Semaphore {
  * ------------------------------------------------------------------------- */
 
 interface AgentCallPayload {
+  /**
+   * Where this call sits in the run's structural tree, assigned worker-side.
+   *
+   * The journal's identity for the call — see journal.ts. The host compares it
+   * and takes prefixes of it; it never builds one.
+   */
+  path: string;
   prompt: string;
   label?: string;
   model?: string;
@@ -614,19 +621,24 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
   const journalEntries = options.journal?.entries ?? [];
   const recordJournal = options.journal?.append;
+  /** Every journaled call, by the path that identifies it. */
+  const journalByPath = new Map<string, WorkflowJournalEntry>();
+  for (const entry of journalEntries) if (!journalByPath.has(entry.path)) journalByPath.set(entry.path, entry); // First wins: duplicates should be impossible; first is the earlier arrival.
   /**
-   * Whether the replayable prefix is still intact.
+   * Frames in which something has already missed.
    *
-   * Once a position misses — different key, a journaled failure, or nothing
-   * recorded there — every later call runs live, however well it matches.
-   * See the header of journal.ts for why this is a prefix and not a lookup.
+   * A call replays only when no frame enclosing it is dirty, which is what
+   * makes "upstream changed ⇒ everything downstream of it runs live" hold
+   * without invalidating the sibling chains that did not change. See the header
+   * of journal.ts, including the one case this over-invalidates.
    */
+  const dirtyFrames = new Set<string>();
   // A journal from a run that used `agent({ resume })` is declined whole: see
   // journal.ts on why a replayed agent leaves nothing for a later resume to
   // continue. Declining up front beats stranding the first `resume` call
   // partway through a run that has already spent its cheap half.
   const journalResumes = journalEntries.some(entry => entry.resumed);
-  let prefixIntact = journalEntries.length > 0 && !journalResumes;
+  const journalUsable = journalEntries.length > 0 && !journalResumes;
   let replayedCount = 0;
 
   /* --- live control ---------------------------------------------------- */
@@ -705,12 +717,30 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     },
   });
 
-  /** The journal entry to reuse at `index`, or undefined to run it live. */
-  function replayAt(index: number, key: string): WorkflowJournalEntry | undefined {
-    if (!prefixIntact) return undefined;
-    const entry = journalEntries[index];
-    if (entry === undefined || entry.index !== index || entry.key !== key || !entry.ok) {
-      prefixIntact = false;
+  /** The frame a call at `path` belongs to: everything before its own slot. */
+  function frameOf(path: string): string {
+    const slot = path.lastIndexOf("#");
+    return slot === -1 ? "" : path.slice(0, slot);
+  }
+
+  /** Whether `frame`, or any frame it is nested inside, has already missed. */
+  function chainDirty(frame: string): boolean {
+    if (dirtyFrames.has("")) return true;
+    for (let at = frame.indexOf("/"); at !== -1; at = frame.indexOf("/", at + 1)) {
+      if (dirtyFrames.has(frame.slice(0, at))) return true;
+    }
+    return dirtyFrames.has(frame);
+  }
+
+  /** The journal entry to reuse at `path`, or undefined to run it live. */
+  function replayAt(path: string, key: string): WorkflowJournalEntry | undefined {
+    if (!journalUsable) return undefined;
+    const entry = journalByPath.get(path);
+    const frame = frameOf(path);
+    if (entry === undefined || entry.key !== key || !entry.ok || chainDirty(frame)) {
+      // Everything later in this chain was produced downstream of whatever just
+      // changed, so it runs live too.
+      dirtyFrames.add(frame);
       return undefined;
     }
     return entry;
@@ -881,7 +911,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         ...payload,
         schema: payload.schema !== undefined ? JSON.stringify(payload.schema) : undefined,
       };
-      let replayed = replayAt(index, journalKey(keyInput));
+      let replayed = replayAt(payload.path, journalKey(keyInput));
       // A replayed answer still has to satisfy the schema. The key covers a
       // schema that *changed*, but not a journal that was hand-edited, and not
       // the empty text a torn entry leaves behind — either would hand the
@@ -889,7 +919,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       if (replayed !== undefined && compiledSchema !== undefined) {
         const recheck = applySchema({ ok: true, text: replayed.text ?? "" }, compiledSchema);
         if (!recheck.ok) {
-          prefixIntact = false;
+          dirtyFrames.add(frameOf(payload.path));
           replayed = undefined;
         }
       }
@@ -915,8 +945,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         openLaunches.delete(callId);
         // Re-recorded so this run's journal is complete on its own terms: a
         // resume of a resume must not have to walk back through a chain of
-        // earlier files to find the prefix.
-        recordJournal?.({ index, key: replayed.key, ok: true, text: replayedText });
+        // earlier files to find what it already has.
+        recordJournal?.({ path: payload.path, index, key: replayed.key, ok: true, text: replayedText });
         respond(callId, true, replayedText);
         return;
       }
@@ -926,7 +956,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
       /** A skip the user asked for, before the child ever started. */
       const settleSkipped = (extra: Partial<WorkflowAgentEntry>) => {
-        recordJournal?.({ index, key, ok: false, ...resumeMark });
+        recordJournal?.({ path: payload.path, index, key, ok: false, ...resumeMark });
         emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error: "Skipped by user." }]);
         // `null`, exactly as a terminal failure gives — a skipped agent is one
         // the script's `.filter(Boolean)` was already written to survive.
@@ -1099,14 +1129,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           if (result.ok) {
             const text = result.text ?? "";
             emit([{ ...common, state: "done", resultPreview: preview(text) }]);
-            recordJournal?.({ index, key, ok: true, text, ...resumeMark });
+            recordJournal?.({ path: payload.path, index, key, ok: true, text, ...resumeMark });
             respond(callId, true, text);
             return;
           }
-          // Recorded as a failure rather than left out: a gap would be read as an
-          // unchanged prefix on the next resume, silently skipping the retry this
-          // whole mechanism exists to make cheap.
-          recordJournal?.({ index, key, ok: false, ...resumeMark });
+          // Recorded as a failure rather than left out: a gap and a recorded
+          // failure both run live, but only the record says the call was tried
+          // and broke, which is what the reader of the journal came for.
+          recordJournal?.({ path: payload.path, index, key, ok: false, ...resumeMark });
           // A dead agent is a null in the script, not a thrown error: Claude Code
           // scripts .filter(Boolean) rather than try/catch around every call.
           emit([
