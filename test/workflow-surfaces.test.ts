@@ -166,6 +166,42 @@ describe("/workflows", () => {
     expect(String((sent[0] as { content?: unknown })?.content)).toContain("<result>T7</result>");
   });
 
+    it("passes nested, array, unicode, empty and absent args through verbatim", async () => {
+      seedRoots([
+        { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return JSON.stringify(args ?? null);") },
+      ]);
+      const cases: { label: string; input: string | undefined; expected: unknown }[] = [
+        { label: "nested", input: '{"a":{"b":[1,{"c":null}]}}', expected: { a: { b: [1, { c: null }] } } },
+        { label: "unicode", input: '{"emoji":"héllo wörld 🎉","esc":"a\\"b"}', expected: { emoji: "héllo wörld 🎉", esc: 'a"b' } },
+        { label: "empty", input: "{}", expected: {} },
+        { label: "absent", input: "", expected: null },
+      ];
+      for (const c of cases) {
+        const booted = bootWorkflows();
+        const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: c.input });
+        await booted.command.handler("", ui.context);
+        const started = ui.notes.find(note => note.text.includes("started in the background"));
+        const taskId = /Task ID: ([A-Za-z0-9_-]+)/.exec(started?.text ?? "")?.[1];
+        expect(taskId, `${c.label} launches`).toBeTruthy();
+        const sent = await awaitNotification(booted, taskId!);
+        const result = /<result>([\s\S]*)<\/result>/.exec(String((sent[0] as { content?: unknown })?.content))?.[1];
+        expect(JSON.parse(result ?? ""), `${c.label} args verbatim`).toEqual(c.expected);
+      }
+    });
+
+    it("refuses invalid JSON args without launching", async () => {
+      seedRoots([
+        { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return 1;") },
+      ]);
+      const booted = bootWorkflows();
+      const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: "{oops" });
+
+      await booted.command.handler("", ui.context);
+
+      expect(ui.notes.some(note => note.text.includes("not valid JSON"))).toBe(true);
+      expect(ui.notes.some(note => note.text.includes("started in the background"))).toBe(false);
+    });
+
   it("refuses when workflows are off, without offering a picker", async () => {
     hermetic.restore();
     hermetic = hermeticDir({ settings: { workflowsEnabled: false } });
