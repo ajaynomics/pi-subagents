@@ -142,7 +142,7 @@ The file must carry an `export const meta = { name, description }` declaration. 
 
 Then invoke it by name: *"run the auth-audit workflow"*. The model passes `name: "auth-audit"` and the run reports that file back as its `Script:`, so the edit-and-re-run loop still works on it.
 
-**`/workflows` lists your saved workflows for you.** Name, description, winning source dir and whether each reads `args`; pick one, hand it JSON args at the prompt, and it launches with the same semantics as `SubagentWorkflow({ name, args })`. `/agents → Workflows` stays a *run* inspector scoped to the current session — it shows runs, not saved files. You can also name a workflow to the model, or run a file with [`--subagents-workflow-file=`](../README.md#cli-flags).
+**`/workflows` lists your saved workflows for you.** Name, description, winning source dir and whether each reads `args`; pick one, hand it JSON args at the prompt (empty for none; Esc cancels the launch), and it launches with the same semantics as `SubagentWorkflow({ name, args })`. `/agents → Workflows` stays a *run* inspector scoped to the current session — it shows runs, not saved files. You can also name a workflow to the model, or run a file with [`--subagents-workflow-file=`](../README.md#cli-flags).
 
 ### 6. Parameterize it
 

@@ -129,37 +129,41 @@ describe("kill-during-write", () => {
 
   // A realistic torn-run shape: header, two settled entries (one a recorded
   // failure), and a third still settling when the kill lands.
-  function fullBytes(): string {
+  function fullBytes(): Buffer {
     const path = join(dir, "run.workflow.jsonl");
     writeJournalHeader(path, { resumeKey: RESUME_KEY, runId: "wf_kill", createdAt: 0 });
-    appendJournal(path, { path: "#0", index: 0, key: "k0", ok: true, text: "first" });
+    // Multi-byte text so byte offsets and code-unit offsets disagree: a cut
+    // inside "é" or the emoji is a real place a kill can land.
+    appendJournal(path, { path: "#0", index: 0, key: "k0", ok: true, text: "first — héllo 🎉" });
     appendJournal(path, { path: "#1", index: 1, key: "k1", ok: false, error: "boom" });
     appendJournal(path, { path: "#2", index: 2, key: "k2", ok: true, text: "third" });
-    return readFileSync(path, "utf-8");
+    return readFileSync(path);
   }
 
   it("replays exactly the complete entries for a kill at any byte offset", () => {
-    // SIGKILL can land mid-write, so every prefix of the file is a journal a
-    // real kill produced. Each must read as exactly the entries fully inside
-    // it — never throw, never return a half-written entry.
+    // SIGKILL can land mid-write, so every BYTE prefix of the file is a
+    // journal a real kill produced — including one cut inside a multi-byte
+    // character. Each must read as exactly the entries fully inside it —
+    // never throw, never return a half-written entry.
     const full = fullBytes();
     const headerLen = full.indexOf("\n") + 1;
     for (let split = 0; split <= full.length; split++) {
       const path = join(dir, `cut-${split}.jsonl`);
-      writeFileSync(path, full.slice(0, split), "utf-8");
+      writeFileSync(path, full.subarray(0, split));
       let consumed = 0;
       const complete: WorkflowJournalEntry[] = [];
-      for (const line of full.split("\n")) {
+      for (const line of full.toString("utf-8").split("\n")) {
         if (line === "") continue;
+        const lineBytes = Buffer.byteLength(line, "utf-8");
         // A line counts as complete without its trailing newline: the readers
         // split on "\n", so a kill landing exactly at a line end still replays it.
-        if (split >= consumed + line.length) {
+        if (split >= consumed + lineBytes) {
           const value: unknown = JSON.parse(line);
           if (typeof value === "object" && value !== null && typeof (value as { path?: unknown }).path === "string") {
             complete.push(value as WorkflowJournalEntry);
           }
         }
-        consumed += line.length + 1;
+        consumed += lineBytes + 1;
       }
       complete.sort((a, b) => a.index - b.index);
       expect(readJournal(path), `kill at offset ${split}`).toEqual(complete);

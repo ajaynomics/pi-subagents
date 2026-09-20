@@ -4141,7 +4141,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         `${detail.name} — ${detail.description} · ${shortWorkflowSource(ctx.cwd, detail.sourceDir)} · ${detail.takesArgs ? "takes args" : "no args"}`,
     );
     if (picked === undefined) return;
-    const argsText = (await ctx.ui.input("Args as JSON (empty for none)"))?.trim() ?? "";
+    const argsInput = await ctx.ui.input("Args as JSON (empty for none)");
+    // Esc is a cancel, not "no args": a launch spends tokens, so it takes an answer.
+    if (argsInput === undefined) return;
+    const argsText = argsInput.trim();
     let args: unknown;
     if (argsText !== "") {
       try {
