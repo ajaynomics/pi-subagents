@@ -56,10 +56,16 @@ const synth = await agent(
   [
     'Synthesize the research into one verdict per topic key.',
     `Cover every topic key exactly once: [${topics.join(', ')}]`,
-    ...research.map((notes, i) => `--- ${topics[i]} ---\n${notes}`),
+    ...research.map((notes, i) => `--- ${topics[i]} ---\n${notes ?? '(researcher returned nothing)'}`),
   ].join('\n'),
   { label: 'synth', phase: 'Synthesize', schema: VERDICTS },
 )
+
+// A schema call can still resolve to null (skipped, or never answered through
+// the tool). Say so by name rather than dying on `null.verdicts`.
+if (synth === null) {
+  throw new Error('synth returned nothing — no verdicts to check coverage against')
+}
 
 // Shape is the schema's job; coverage is the script's. A synth that drops a
 // topic fails HERE, naming it — the run goes red instead of green-but-lossy.

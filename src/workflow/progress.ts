@@ -190,6 +190,15 @@ export function nestingDepth(entry: WorkflowAgentEntry, byIndex: Map<number, Wor
  * `workflowActive` is false once the run has stopped: anything still mid-flight
  * at that point was cut off rather than finished, hence "interrupted".
  */
+/**
+ * A failure the run recorded — not a user skip (`s` in the inspector) and not
+ * a blocked row. The one predicate every "N failed" count keys off, so a
+ * skipped agent never reads as a failure anywhere.
+ */
+export function isFailedAgent(entry: WorkflowAgentEntry): boolean {
+  return entry.state === "error" && !entry.skipped && !entry.blocked;
+}
+
 export function displayState(entry: WorkflowAgentEntry, workflowActive: boolean): WorkflowDisplayState {
   if (entry.state === "done") return "done";
   if (entry.state === "error") {
@@ -353,7 +362,7 @@ export function stats(progress: readonly WorkflowEntry[], agentCount = 0): Workf
       done++;
       started++;
     } else if (entry.state === "error") {
-      failed++;
+      if (isFailedAgent(entry)) failed++;
       started++;
     } else {
       anyLive = true;
@@ -438,7 +447,7 @@ export function header(
     doneAgents += group.doneCount;
     totalAgents += group.totalCount;
     for (const agent of group.agents) {
-      if (agent.state === "error") failedAgents++;
+      if (isFailedAgent(agent)) failedAgents++;
     }
   }
   totalAgents = Math.max(agentCount, totalAgents, doneAgents);
