@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { appendJournal, journalKey, readJournal, type WorkflowJournalEntry } from "../src/workflow/journal.js";
+import { appendJournal, journalKey, readJournal, readJournalHeader, writeJournalHeader, type WorkflowJournalEntry } from "../src/workflow/journal.js";
 import { runWorkflow, type WorkflowSpawnRequest, type WorkflowSpawnResult } from "../src/workflow/runtime.js";
 
 const HEAD = 'export const meta = { name: "probe", description: "a probe" };\n';
@@ -116,6 +116,74 @@ describe("journal files", () => {
       "utf-8",
     );
     expect(readJournal(path)).toEqual([]);
+  });
+});
+
+describe("kill-during-write", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "wf-kill-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  // Valid shape for a header resumeKey: 64 lowercase hex chars.
+  const RESUME_KEY = "ab".repeat(32);
+
+  // A realistic torn-run shape: header, two settled entries (one a recorded
+  // failure), and a third still settling when the kill lands.
+  function fullBytes(): string {
+    const path = join(dir, "run.workflow.jsonl");
+    writeJournalHeader(path, { resumeKey: RESUME_KEY, runId: "wf_kill", createdAt: 0 });
+    appendJournal(path, { path: "#0", index: 0, key: "k0", ok: true, text: "first" });
+    appendJournal(path, { path: "#1", index: 1, key: "k1", ok: false, error: "boom" });
+    appendJournal(path, { path: "#2", index: 2, key: "k2", ok: true, text: "third" });
+    return readFileSync(path, "utf-8");
+  }
+
+  it("replays exactly the complete entries for a kill at any byte offset", () => {
+    // SIGKILL can land mid-write, so every prefix of the file is a journal a
+    // real kill produced. Each must read as exactly the entries fully inside
+    // it — never throw, never return a half-written entry.
+    const full = fullBytes();
+    const headerLen = full.indexOf("\n") + 1;
+    for (let split = 0; split <= full.length; split++) {
+      const path = join(dir, `cut-${split}.jsonl`);
+      writeFileSync(path, full.slice(0, split), "utf-8");
+      let consumed = 0;
+      const complete: WorkflowJournalEntry[] = [];
+      for (const line of full.split("\n")) {
+        if (line === "") continue;
+        // A line counts as complete without its trailing newline: the readers
+        // split on "\n", so a kill landing exactly at a line end still replays it.
+        if (split >= consumed + line.length) {
+          const value: unknown = JSON.parse(line);
+          if (typeof value === "object" && value !== null && typeof (value as { path?: unknown }).path === "string") {
+            complete.push(value as WorkflowJournalEntry);
+          }
+        }
+        consumed += line.length + 1;
+      }
+      complete.sort((a, b) => a.index - b.index);
+      expect(readJournal(path), `kill at offset ${split}`).toEqual(complete);
+      expect(readJournalHeader(path) !== undefined, `header at offset ${split}`).toBe(split >= headerLen - 1);
+    }
+  });
+
+  it("reads a torn header as no key and no entries", () => {
+    // The header is the first line written: a kill during it leaves a file
+    // that is only a partial header, and it must decline both reads.
+    const path = join(dir, "torn-header.jsonl");
+    writeFileSync(path, '{"workflowJournalHeader":1,"resumeKey":"ab', "utf-8");
+
+    expect(readJournal(path)).toEqual([]);
+    expect(readJournalHeader(path)).toBeUndefined();
+  });
+
+  it("reads a header-only file as a key with nothing to replay", () => {
+    // A kill between the header write and the first settled agent.
+    const path = join(dir, "header-only.jsonl");
+    writeJournalHeader(path, { resumeKey: RESUME_KEY, runId: "wf_kill", createdAt: 0 });
+
+    expect(readJournal(path)).toEqual([]);
+    expect(readJournalHeader(path)?.resumeKey).toBe(RESUME_KEY);
   });
 });
 
