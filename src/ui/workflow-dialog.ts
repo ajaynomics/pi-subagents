@@ -56,6 +56,7 @@ import {
   formatDuration,
   header,
   isLive,
+  nestingDepth,
   type PhaseGroup,
   type WorkflowAgentEntry,
   type WorkflowDisplayState,
@@ -634,16 +635,19 @@ function agentRow(options: {
   workflowActive: boolean;
   spinnerFrame: number;
   now: number;
+  /** Nesting depth inside the run; nested rows indent under their parent. */
+  depth?: number;
 }): WorkflowCardLine {
   const { entry, selected, glyphs, width } = options;
   const display = displayState(entry, options.workflowActive);
+  const indentedLabel = `${"  ".repeat(options.depth ?? 0)}${entry.label}`;
   const head: WorkflowCardLine = [
     { text: " " },
     { text: selected ? glyphs.pointer : " ", color: "accent" },
     { text: " " },
     dialogRowGlyph(display, glyphs, options.spinnerFrame),
     { text: " " },
-    { text: entry.label, color: selected ? "accent" : undefined },
+    { text: indentedLabel, color: selected ? "accent" : undefined },
   ];
   // The narrow pane holds the label and nothing else; there is no room for a
   // stat tail, and clamping one would just spend columns on a truncated word.
@@ -743,6 +747,8 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // overview level and the left pane in the subview, so it is built once.
   const agentPaneWidth = inPhases ? rightWidth : leftWidth;
   const agentRows: WorkflowCardLine[] = [];
+  const dialogByIndex = new Map<number, WorkflowAgentEntry>();
+  for (const group of view.groups) for (const agent of group.agents) dialogByIndex.set(agent.index, agent);
   if (view.visibleAgents.length === 0) {
     agentRows.push(clampLine([{ text: `   ${WORKFLOW_DIALOG_COPY.noAgents}`, color: "dim" }], agentPaneWidth));
   } else {
@@ -758,6 +764,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
           workflowActive: view.workflowActive,
           spinnerFrame,
           now,
+          depth: nestingDepth(view.visibleAgents[i], dialogByIndex),
         }),
       );
     }

@@ -153,6 +153,19 @@ export type MentionResolution =
   | { kind: "live"; record: AgentRecord }
   | { kind: "tombstone"; entry: AgentTombstone };
 
+export interface WorkflowNestingHooks {
+  registerNested(
+    child: { label: string; agentType?: string; model?: string; promptPreview?: string },
+    parentIndex?: number,
+  ): { ok: true; index: number } | { ok: false; error: string };
+  updateNestedRecordId(index: number, recordId: string): void;
+  acquireNestedSlot(blocked: boolean): Promise<() => void>;
+  settleNested(
+    index: number,
+    outcome: { ok: boolean; error?: string; tokens?: number; toolCalls?: number },
+  ): void;
+}
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;

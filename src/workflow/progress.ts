@@ -62,6 +62,8 @@ export interface WorkflowAgentEntry {
   phaseTitle?: string;
   state: WorkflowEntryState;
   agentId?: string;
+  /** Progress index of the parent entry; undefined for top-level agents. */
+  parentIndex?: number;
   /**
    * The manager's `AgentRecord` id, once the child has one.
    *
@@ -164,6 +166,22 @@ export function collapse(progress: readonly WorkflowEntry[]): CollapsedProgress 
     logs,
     phaseTitles,
   };
+}
+
+/** Depth of a nested agent: top-level entries are 0, children add one per parent link. */
+export function nestingDepth(entry: WorkflowAgentEntry, byIndex: Map<number, WorkflowAgentEntry>): number {
+  let depth = 0;
+  let current = entry;
+  const seen = new Set<number>();
+  while (current.parentIndex !== undefined) {
+    if (seen.has(current.index)) break;
+    seen.add(current.index);
+    const parent = byIndex.get(current.parentIndex);
+    if (!parent) break;
+    depth++;
+    current = parent;
+  }
+  return depth;
 }
 
 /**
