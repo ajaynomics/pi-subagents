@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/workflows` args edge cases are pinned end-to-end.** Nested objects, arrays, unicode, empty and absent args reach the launched script verbatim, and invalid JSON is refused without launching. No behavior change.
 - **Completion notices name the run's journal file.** A truncated `<result>` kept its marker but gave no path to the full text; the notice now carries a `<journal>` line (omitted when the run journaled nowhere) so a 48KB synth output is one file read away. No other notice shape changed.
 - **Progress counts state failures outright.** `done/total agents` on the card and in the completion summary now carries a failure segment while failures stand (`3/7 agents · 1 failed`), so the denominator — planned agents — can never be misread as a failure count. Silent when zero.
+- **Synth stages can prove per-topic coverage.** New `examples/workflows/synth-coverage.js`: researchers fan out over stable topic keys, one schema'd synth returns a verdict per key, and the script throws naming any key the synth dropped — green-but-lossy is now a failed run. Recipe in the guide.
 
 ## [0.19.0] - 2026-08-25
 

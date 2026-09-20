@@ -390,6 +390,14 @@ This is the case where a barrier is *earned* — the synthesis agent's prompt ge
 
 See [`review-panel.js`](../examples/workflows/review-panel.js).
 
+### Synthesize without dropping a topic
+
+> *"reconcile the seven findings into one decision each, and prove none got lost"*
+
+Give the synth stable topic keys (not free-text labels), demand one verdict per key through `schema` for shape, then assert coverage in the script and throw naming the missing keys — a lossy synth fails the run instead of passing quietly.
+
+See [`synth-coverage.js`](../examples/workflows/synth-coverage.js).
+
 ### Reuse a workflow inside another
 
 > *"map the repo first, then run the audit against what it found"*
@@ -470,5 +478,6 @@ Every file below is executed by `test/workflow-examples.test.ts` against a stub 
 | [`review-panel.js`](../examples/workflows/review-panel.js) | An earned `parallel` barrier, `effort` tiering, `model` | Yes |
 | [`compose.js`](../examples/workflows/compose.js) | `workflow()` nesting and `args` plumbing | Needs `lib/count-child.js` saved |
 | [`decompose.js`](../examples/workflows/decompose.js) | Recursive `workflow()` self-nesting with `depth`/`fanout` args | Yes |
+| [`synth-coverage.js`](../examples/workflows/synth-coverage.js) | Per-topic synth verdicts via `schema` + a coverage assert that fails loud | Yes — takes `args.topics` |
 
 Copy one into `.pi/workflows/` to make it yours.
