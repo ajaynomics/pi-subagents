@@ -57,6 +57,7 @@ const readExample = (dir: string, name: string) => readFileSync(join(dir, name),
 const SAMPLE_ARGS: Record<string, unknown> = {
   "fan-out-audit.js": { root: "src/routes/" },
   "compose.js": { root: "src/" },
+  "synth-coverage.js": { topics: ["red", "green", "blue"] },
 };
 
 /**
@@ -110,6 +111,19 @@ function stubHost(options: { gateFailsFor?: string[] } = {}): {
           return {
             ok: true,
             text: JSON.stringify({ subtasks: ["part-a", "part-b"] }),
+            outputTokens: 10,
+          };
+        }
+        // synth-coverage: echo one verdict per key named in the prompt, so the
+        // example proves coverage for whatever topic list it is given.
+        if (label === "synth") {
+          const keys = /Cover every topic key exactly once: \[(.*)\]/.exec(request.prompt)?.[1]
+            ?.split(",")
+            .map(key => key.trim())
+            .filter(key => key !== "") ?? [];
+          return {
+            ok: true,
+            text: JSON.stringify({ verdicts: keys.map(topic => ({ topic, decision: `${topic} decided` })) }),
             outputTokens: 10,
           };
         }
@@ -168,6 +182,7 @@ describe("shipped example workflows", () => {
       "gated-fix.js",
       "review-panel.js",
       "structured-findings.js",
+      "synth-coverage.js",
       "worklist-crawl.js",
     ]);
     expect(childFiles).toEqual(["count-child.js"]);
@@ -308,6 +323,35 @@ describe("shipped example workflows", () => {
         { item: "alpha-followup", result: "ok:crawl:alpha-followup" },
         { item: "beta", result: "ok:crawl:beta" },
       ]);
+    });
+
+    it("synth-coverage returns one verdict per topic key", async () => {
+      const { host } = stubHost();
+      const result = await runExample("synth-coverage.js", host);
+
+      // 3 researchers + 1 synth, every key covered.
+      expect(result.error).toBeUndefined();
+      expect(result.agentCount).toBe(4);
+      const value = result.value as { topics: number; verdicts: { topic: string }[] };
+      expect(value.topics).toBe(3);
+      expect(value.verdicts.map(v => v.topic).sort()).toEqual(["blue", "green", "red"]);
+    });
+
+    it("synth-coverage fails loudly when the synth drops a topic", async () => {
+      const { host } = stubHost();
+      const dropping: WorkflowHost = {
+        ...host,
+        async spawnAgent(request) {
+          if (request.label === "synth" && request.schema !== undefined) {
+            return { ok: true, text: JSON.stringify({ verdicts: [{ topic: "red", decision: "kept" }] }), outputTokens: 10 };
+          }
+          return host.spawnAgent(request);
+        },
+      };
+      const result = await runExample("synth-coverage.js", dropping);
+
+      expect(result.status).toBe("failed");
+      expect(result.error).toContain("dropped topics");
     });
   });
 
