@@ -370,6 +370,16 @@ describe("header", () => {
     expect(header(task, meta, groups, 3, 73_000).stats).toBe("1/3 agents · 1 failed · 1m12s");
   });
 
+  it("does not count a user-skipped agent as a failure", () => {
+    const groups = buildPhaseGroups([
+      agentEntry({ index: 0, state: "done" }),
+      agentEntry({ index: 1, state: "error", skipped: true }),
+      agentEntry({ index: 2, state: "error", blocked: true }),
+      agentEntry({ index: 3, state: "error" }),
+    ]);
+    expect(header(task, meta, groups, 4, 2000).stats).toBe("1/4 agents · 1 failed · 1s");
+  });
+
   it("singularizes a lone agent", () => {
     const groups = buildPhaseGroups([agentEntry({ index: 0, state: "done" })]);
     expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent · 1s");

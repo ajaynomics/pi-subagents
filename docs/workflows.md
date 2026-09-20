@@ -68,7 +68,7 @@ A **card in the transcript**, updating as the run goes:
   ⎿  auditing 6 route files
 ```
 
-While failures stand, the header states them outright (`3/7 agents · 1 failed · 1m12s`) — the denominator is planned agents, never a failure count.
+While failures stand, the header states them outright (`3/7 agents · 1 failed · 1m12s`) — the denominator is planned agents, never a failure count. An agent you skipped with `s` is not a failure and does not appear in that segment.
 
 A **`workflow` row in FleetView**, above the agents, carrying its agent counts where a description would go. `⏎` on it opens the inspector rather than a conversation overlay.
 

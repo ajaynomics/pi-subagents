@@ -235,6 +235,20 @@ describe("/workflows", () => {
 
       expect(formatWorkflowNotification(task)).toContain("1/2 agents, 1 failed");
     });
+
+    it("does not report a user-skipped agent as failed in the summary", () => {
+      const task = createWorkflowTask({ id: "wf_skipped", script: "return 1;" });
+      task.status = "completed";
+      task.value = "done";
+      task.workflowProgress = [
+        { type: "workflow_agent", index: 0, label: "a", state: "done" },
+        { type: "workflow_agent", index: 1, label: "b", state: "error", skipped: true },
+      ];
+
+      const note = formatWorkflowNotification(task);
+      expect(note).toContain("1/2 agents");
+      expect(note).not.toContain("failed");
+    });
   });
 
   it("refuses when workflows are off, without offering a picker", async () => {

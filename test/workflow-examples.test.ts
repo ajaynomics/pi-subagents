@@ -353,6 +353,24 @@ describe("shipped example workflows", () => {
       expect(result.status).toBe("failed");
       expect(result.error).toContain("dropped topics");
     });
+
+    it("synth-coverage names a null synth instead of dying on it", async () => {
+      // A schema call the child never answers through the tool resolves to
+      // null; the example must say so, not throw `Cannot read ... of null`.
+      const { host } = stubHost();
+      const silent: WorkflowHost = {
+        ...host,
+        async spawnAgent(request) {
+          if (request.label === "synth") return { ok: true, text: "not json", outputTokens: 10 };
+          return host.spawnAgent(request);
+        },
+      };
+      const result = await runExample("synth-coverage.js", silent);
+
+      expect(result.status).toBe("failed");
+      expect(result.error).toContain("synth returned nothing");
+      expect(result.error).not.toContain("null");
+    });
   });
 
   // A negative case, rather than shipping a deliberately broken file.
