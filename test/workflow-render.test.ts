@@ -115,7 +115,8 @@ describe("inline glyph mapping", () => {
       theme,
     );
     expect(styled.find(l => l.includes("done"))).toContain("<success>✔</success>");
-    expect(styled.find(l => l.includes("failed"))).toContain("<error>✘</error>");
+    // The header states failures too — scope the find to the agent row.
+    expect(styled.find(l => l.includes("failed") && !l.includes("agents ·"))).toContain("<error>✘</error>");
     const running = styled.find(l => l.includes("started")) ?? "";
     expect(running).toContain("⟳");
     expect(running).not.toContain(">⟳<");

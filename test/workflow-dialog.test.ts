@@ -181,7 +181,8 @@ describe("dialog glyph mapping", () => {
     const lines = styled({ progress: live });
     expect(lines.find(l => l.includes("skipped"))).toContain("<dim>✘</dim>");
     expect(lines.find(l => l.includes("blocked"))).toContain("<warning>✘</warning>");
-    expect(lines.find(l => l.includes("failed"))).toContain("<error>✘</error>");
+    // The header states failures too — scope the find to the agent row.
+    expect(lines.find(l => l.includes("failed") && !l.includes("agents ·"))).toContain("<error>✘</error>");
     expect(lines.find(l => l.includes(">done"))).toContain("<success>✔</success>");
   });
 
