@@ -39,6 +39,7 @@ import {
   collapse,
   formatDuration,
   header,
+  nestingDepth,
   sizeWarning,
   stats,
   type WorkflowAgentEntry,
@@ -332,9 +333,12 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
   // ---- Phase tree ----
   // Stats line up in one column across the whole card, not per group, so the
   // eye can scan them; a label past the cap just pushes its own stats along.
+  const byIndex = new Map(agents.map(a => [a.index, a] as const));
+  const indentedLabel = (a: WorkflowAgentEntry): string =>
+    `${"  ".repeat(nestingDepth(a, byIndex))}${a.label}`;
   const labelColumn = Math.min(
     LABEL_COLUMN_MAX,
-    Math.max(0, ...groups.flatMap(group => group.agents.map(a => visibleWidth(a.label)))),
+    Math.max(0, ...groups.flatMap(group => group.agents.map(a => visibleWidth(indentedLabel(a))))),
   );
 
   groups.forEach((group, groupIndex) => {
@@ -378,8 +382,9 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
       const statParts = entry.cached
         ? [REPLAYED_ANNOTATION, ...agentStatSegments(entry)]
         : agentStatSegments(entry);
-      const pad = Math.max(0, labelColumn - visibleWidth(entry.label));
-      segments.push({ text: statParts.length > 0 ? entry.label + " ".repeat(pad) : entry.label });
+      const shownLabel = indentedLabel(entry);
+      const pad = Math.max(0, labelColumn - visibleWidth(shownLabel));
+      segments.push({ text: statParts.length > 0 ? shownLabel + " ".repeat(pad) : shownLabel });
       for (const part of statParts) {
         segments.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
       }

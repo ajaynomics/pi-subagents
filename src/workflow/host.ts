@@ -290,6 +290,48 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
               }
             };
 
+      let nestedCapBreach: string | undefined;
+      const nestingHooks =
+        request.nestedScope !== undefined
+          ? {
+              registerNested: (
+                child: { label: string; agentType?: string; model?: string; promptPreview?: string },
+                parentIndex?: number,
+              ) => {
+                // First breach wins: a later failure (a second over-cap
+                // grandchild, or a scope torn down mid-run) must not clobber
+                // the cap error that actually failed the run.
+                const noteBreach = (error: string): void => {
+                  nestedCapBreach ??= error;
+                  // Admission control: stop the over-cap child now, while it is
+                  // still running, rather than letting it burn tokens and
+                  // side-effects to completion before failing the run.
+                  if (spawnedId !== undefined) manager.abort(spawnedId);
+                };
+                const scope = request.nestedScope;
+                if (scope === undefined) {
+                  noteBreach("Workflow aborted.");
+                  return { ok: false as const, error: "Workflow aborted." };
+                }
+                const result = scope.registerNested(child, parentIndex);
+                if (!result.ok) noteBreach(result.error);
+                return result;
+              },
+              updateNestedRecordId: (index: number, recordId: string): void => {
+                request.nestedScope?.updateNestedRecordId(index, recordId);
+              },
+              acquireNestedSlot: (blocked: boolean): Promise<() => void> => {
+                if (request.nestedScope === undefined) return Promise.resolve(() => {});
+                return request.nestedScope.acquireNestedSlot(blocked);
+              },
+              settleNested: (
+                index: number,
+                outcome: { ok: boolean; error?: string; tokens?: number; toolCalls?: number },
+              ): void => {
+                request.nestedScope?.settleNested(index, outcome);
+              },
+            }
+          : undefined;
       try {
         const { record } = await manager.spawnAndWait(
           pi,
@@ -336,6 +378,11 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
             ...(deps.rootSessionId !== undefined ? { rootSessionId: deps.rootSessionId } : {}),
             ...(onBeforeWorktreeCleanup !== undefined ? { onBeforeWorktreeCleanup } : {}),
+            ...(nestingHooks !== undefined ? { nestingHooks } : {}),
+            // The direct child's own progress index, so its nested children can
+            // name their parent explicitly (the runtime keeps `?? index` as a
+            // backstop for callers that omit it).
+            nestParentIndex: request.index,
           },
           id => {
             spawnedId = id;
@@ -349,6 +396,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             reportResolved();
           },
         );
+        if (nestedCapBreach !== undefined) return { ok: false, error: nestedCapBreach, fatal: true };
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
       } catch (error) {
         // Strict worktree isolation rejects out of `awaitStartup` — the child

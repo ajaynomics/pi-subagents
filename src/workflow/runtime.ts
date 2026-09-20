@@ -53,6 +53,22 @@ export function workflowConcurrency(cpuCount: number = cpus().length): number {
 }
 
 /** One agent the script asked for. `agentId` is the handle for {@link WorkflowHost.abortAgent}. */
+export interface WorkflowNestedChildInfo {
+  label: string;
+  agentType?: string;
+  model?: string;
+  promptPreview?: string;
+}
+
+export type WorkflowNestedRegisterResult = { ok: true; index: number } | { ok: false; error: string };
+
+export interface WorkflowNestedScope {
+  registerNested(child: WorkflowNestedChildInfo, parentIndex?: number): WorkflowNestedRegisterResult;
+  updateNestedRecordId(index: number, recordId: string): void;
+  acquireNestedSlot(blocked: boolean): Promise<() => void>;
+  settleNested(index: number, result: { ok: boolean; error?: string; tokens?: number; toolCalls?: number }): void;
+}
+
 export interface WorkflowSpawnRequest {
   agentId: string;
   /** Position in the run, and the progress entry's stable identity. */
@@ -121,6 +137,17 @@ export interface WorkflowSpawnRequest {
    * itself — so exactly one execution either way.
    */
   gate?: string;
+  /**
+   * Agent-native nesting scope for this child, present on every spawn.
+   *
+   * The host forwards these into the child's manager spawn options so a nested
+   * `Agent` tool inside the child reports back here: `registerNested` counts the
+   * grandchild toward `agentCap` and emits its progress row (with `parentIndex`),
+   * `acquireNestedSlot` admits it without deadlocking a parent that blocks
+   * awaiting it, and `settleNested` closes its row. A stub host that never calls
+   * them keeps today's behaviour exactly.
+   */
+  nestedScope?: WorkflowNestedScope;
 }
 
 export interface WorkflowSpawnResult {
@@ -164,6 +191,8 @@ export interface WorkflowSpawnResult {
    * decision and the error shaping still happen there, in one place.
    */
   gate?: WorkflowGateResult;
+  /** Run-fatal failure: the runtime fails the run rather than folding this to null. */
+  fatal?: boolean;
 }
 
 /** Outcome of a `gate` command. `output` is what the user is shown when it fails. */
@@ -778,6 +807,18 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       options.onProgress?.(entries);
     };
 
+  /**
+   * Nested rows by run-global index, shared by every direct child's scope.
+   *
+   * Indices come from the run-global `agentCount`, so a row must be
+   * findable from any scope: a settle or record-id update arriving on the
+   * wrong scope would otherwise silently no-op, leaking the `start` row (and
+   * the background permit held until its settle). Registration stays per-child
+   * — it needs that child's identity for naming and the parent fallback —
+   * but every op reads and writes this one map.
+   */
+  const nestedBases = new Map<number, WorkflowAgentEntry>();
+
     const respond = (callId: number, ok: boolean, value?: unknown, error?: string, fatal?: boolean) => {
       // Cleared before the settled check: a launch answered by a run that is
       // already finishing is not an unawaited launch either.
@@ -1055,6 +1096,83 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           };
           live.started = true;
           inflight.add(agentId);
+          const nestedScope: WorkflowNestedScope = {
+            registerNested: (child, parentIndex) => {
+              if (agentCount >= agentCap) {
+                return { ok: false, error: `Workflow exceeded its cap of ${agentCap} agents.` };
+              }
+              const nestedIndex = agentCount++;
+              const at = Date.now();
+              const nestedBase: WorkflowAgentEntry = {
+                type: "workflow_agent",
+                index: nestedIndex,
+                label: child.label,
+                state: "start",
+                agentId: `${agentId}/nested-${nestedIndex}`,
+                parentIndex: parentIndex ?? index,
+                ...(child.agentType !== undefined ? { agentType: child.agentType } : {}),
+                ...(child.model !== undefined ? { model: child.model } : {}),
+                ...(child.promptPreview !== undefined ? { promptPreview: child.promptPreview } : {}),
+                ...(payload.phaseIndex !== undefined ? { phaseIndex: payload.phaseIndex } : {}),
+                ...(payload.phaseTitle !== undefined ? { phaseTitle: payload.phaseTitle } : {}),
+              };
+              nestedBases.set(nestedIndex, nestedBase);
+              emit([{ ...nestedBase, queuedAt: at, startedAt: at, lastProgressAt: at }]);
+              return { ok: true, index: nestedIndex };
+            },
+            updateNestedRecordId: (nestedIndex, recordId) => {
+              const nestedBase = nestedBases.get(nestedIndex);
+              if (!nestedBase) return;
+              nestedBase.recordId = recordId;
+              emit([{ ...nestedBase, lastProgressAt: Date.now() }]);
+            },
+            acquireNestedSlot: async blocked => {
+              if (blocked) return () => {};
+              await semaphore.acquire();
+              if (aborted || settled) {
+                semaphore.release();
+                throw new Error("Workflow aborted.");
+              }
+              let released = false;
+              return () => {
+                if (released) return;
+                released = true;
+                semaphore.release();
+              };
+            },
+            settleNested: (nestedIndex, outcome) => {
+              const nestedBase = nestedBases.get(nestedIndex);
+              if (!nestedBase) return;
+              nestedBases.delete(nestedIndex);
+              // A row settling after the run is over emits nothing: progress is
+              // append-only and a late emit would mutate it after finish. The
+              // caller still releases the run slot it took (see acquireNestedSlot).
+if (settled || aborted) return;
+              const at = Date.now();
+              if (outcome.ok) {
+                emit([{
+                  ...nestedBase,
+                  queuedAt: at,
+                  startedAt: at,
+                  lastProgressAt: at,
+                  durationMs: 0,
+                  state: "done",
+                  ...(outcome.tokens !== undefined ? { tokens: outcome.tokens } : {}),
+                  ...(outcome.toolCalls !== undefined ? { toolCalls: outcome.toolCalls } : {}),
+                }]);
+              } else {
+                emit([{
+                  ...nestedBase,
+                  queuedAt: at,
+                  startedAt: at,
+                  lastProgressAt: at,
+                  durationMs: 0,
+                  state: "error",
+                  error: outcome.error ?? "Agent failed.",
+                }]);
+              }
+            },
+          };
 
           let result: WorkflowSpawnResult;
           try {
@@ -1077,6 +1195,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     // child's worktree does, and hands back `result.gate`.
                     ...(payload.gate !== undefined ? { gate: payload.gate } : {}),
                     onResolved,
+                    nestedScope,
                   });
             if (result.ok) {
               // Recorded before the gate runs: the child itself finished, so it is
@@ -1112,6 +1231,15 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           }
 
           if (settled) return;
+
+          if (!result.ok && result.fatal) {
+            const fatalAt = Date.now();
+            const error = result.error ?? "Agent failed.";
+            recordJournal?.({ path: payload.path, index, key, ok: false, ...resumeMark, error });
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: fatalAt, durationMs: fatalAt - startedAt, state: "error", error }]);
+            respond(callId, false, undefined, error, true);
+            return;
+          }
 
           // The stop that produced this result was ours, so run the same call
           // again rather than reporting it. The script is still awaiting this

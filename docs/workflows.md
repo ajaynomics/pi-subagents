@@ -281,6 +281,12 @@ The child runs in the *same* worker and vm context under its own globals, so it 
 
 Nesting is bounded by `maxWorkflowDepth` (default 6; root is depth 0, so `1` allows exactly one child level) — a `workflow()` past that depth throws naming the limit and the workflow, so `try`/`catch` if you want to handle it. An unknown name, an unreadable path, a child carrying no `meta`, or a child that will not parse all throw into the calling script the same way. Capped at 256 nested calls per run.
 
+### Agent-native nesting inside runs
+
+A workflow agent whose definition sets `allowed_subagents` can delegate with the nested `Agent` tool, and those grandchildren are first-class members of the run. Every agent transitively spawned beneath a run's agent carries that run's id, so a child, grandchild and deeper all report through the run; a standalone agent's children carry nothing. Nested rows render indented under their parent on the card and in the inspector, and carry the parent's progress index — top-level rows have none. Pressing `c` on a nested row opens its conversation exactly like a top-level row.
+
+Nested children count toward the run's agent cap, and a nested breach fails the run with the same `Workflow exceeded its cap of N agents.` error as a direct breach — the first breach wins when several grandchildren breach at once, and the over-cap child is stopped as soon as the breach is recorded rather than running to completion first. A breached parent journals as a failure like any other, so resuming retries it live instead of replaying it. A foreground child borrows its parent's run slot while the parent awaits it, so a chain of blocked ancestors costs one width and a fully-loaded run cannot deadlock with every slot held by parents awaiting children that cannot start; a background child takes its own slot only while the parent awaits it (`get_subagent_result` with `wait: true`), never at spawn — spawning at a saturated cap no longer deadlocks — and polls that never wait take no slot. A nested row settling after its run is over emits nothing further. The shipped `.pi/agents/worker.md` (self-nesting `allowed_subagents: worker`) is the minimal example.
+
 ### `phase()`, `log()`, `args`, `budget`
 
 - **`phase(title)`** — start a new progress group; subsequent `agent()` calls are grouped under it. Inside `pipeline`/`parallel` stages use the `phase` *option* instead, since the ambient phase races.

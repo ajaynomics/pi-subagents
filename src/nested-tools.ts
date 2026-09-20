@@ -32,8 +32,9 @@ import type {
   AgentRecord,
   IsolationMode,
   ThinkingLevel,
+  WorkflowNestingHooks,
 } from "./types.js";
-import { addUsage } from "./usage.js";
+import { addUsage, getLifetimeTotal } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
 
 /**
@@ -65,6 +66,12 @@ interface NestedSpawnOptions {
   depth: number;
   parentAgentId: string;
   maxSubagentDepth: number;
+  /** Run id inherited from the parent record; undefined for standalone branches. */
+  workflowId?: string;
+  /** Workflow nesting hooks, present when the parent belongs to a workflow run. */
+  nestingHooks?: WorkflowNestingHooks;
+  /** This parent's own progress index inside its run, for attributing grandchildren. */
+  nestParentIndex?: number;
   configCwd?: string;
   rootSessionId?: string;
 }
@@ -89,6 +96,8 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
+  /** Correct a nested child's progress parent after its run row is allocated. */
+  setNestParentIndex(id: string, nestParentIndex: number): void;
   resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined>;
 }
 
@@ -98,6 +107,12 @@ export interface NestedToolContext {
   parentAgentId: string;
   depth: number;
   maxSubagentDepth: number;
+  /** Run id inherited from the parent record; undefined for standalone branches. */
+  workflowId?: string;
+  /** Workflow nesting hooks, present when the parent belongs to a workflow run. */
+  nestingHooks?: WorkflowNestingHooks;
+  /** This parent's own progress index inside its run, for attributing grandchildren. */
+  nestParentIndex?: number;
   /** "all" = any enabled agent; string[] = only those types. Never empty. */
   allowedSubagents: "all" | string[];
   /** Root used for agent/config discovery; may differ from the agent's working directory. */
@@ -156,6 +171,20 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     const allowed = allowedTypesIn(registry);
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
   };
+
+  /**
+   * A background grandchild's row between spawn and settle, shared by every
+   * tool call of its parent: the spawn registers it, a later `get_subagent_result`
+   * await takes its run slot, and the settle releases it.
+   */
+  interface BackgroundNestedWait {
+    index: number;
+    settled: boolean;
+    recordId?: string;
+    release?: () => void;
+  }
+  const backgroundWaitsByIndex = new Map<number, BackgroundNestedWait>();
+  const backgroundWaitsByRecord = new Map<string, BackgroundNestedWait>();
 
   const agentTool = defineTool({
     name: NESTED_TOOL_NAMES[0],
@@ -291,6 +320,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         depth: childDepth,
         parentAgentId: context.parentAgentId,
         maxSubagentDepth: context.maxSubagentDepth,
+        ...(context.workflowId !== undefined ? { workflowId: context.workflowId } : {}),
         configCwd: context.configCwd,
         rootSessionId,
       };
@@ -333,29 +363,140 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // report it as a tool error, like the top-level Agent tool does, instead of
       // letting it escape into the child's turn.
       try {
-        if (invocation.runInBackground) {
-          const id = context.manager.spawn(context.pi, ctx, resolvedType, params.prompt, {
-            ...options,
-            isBackground: true,
-          });
-          // Synchronous, before the event loop yields — onSessionCreated fires
-          // asynchronously inside runAgent, so the file is attached in time.
-          attachTranscript(id);
-          // Worktree isolation starts the agent asynchronously; surface its
-          // failure as a tool error, like the synchronous throw used to.
-          await context.manager.awaitStartup(id);
-          return textResult(`Nested agent started in background. Agent ID: ${id}`);
+        const hooks = context.nestingHooks;
+        let nestedIndex: number | undefined;
+        let releaseNestedSlot: (() => void) | undefined;
+        let nestedSettled = false;
+        const settleNestedChild = (outcome: { ok: boolean; error?: string; tokens?: number; toolCalls?: number }): void => {
+          if (hooks === undefined || nestedIndex === undefined || nestedSettled) return;
+          nestedSettled = true;
+          hooks.settleNested(nestedIndex, outcome);
+          releaseNestedSlot?.();
+          releaseNestedSlot = undefined;
+        };
+        // Background rows settle through their shared wait entry (declared with
+        // the result tool below), so an await in a later tool call releases the
+        // slot this spawn deferred.
+        const settleBackgroundRow = (
+          index: number | undefined,
+          outcome: { ok: boolean; error?: string; tokens?: number; toolCalls?: number },
+        ): void => {
+          if (hooks === undefined || index === undefined) return;
+          const wait = backgroundWaitsByIndex.get(index);
+          if (wait === undefined || wait.settled) return;
+          wait.settled = true;
+          backgroundWaitsByIndex.delete(index);
+          if (wait.recordId !== undefined) backgroundWaitsByRecord.delete(wait.recordId);
+          hooks.settleNested(index, outcome);
+          wait.release?.();
+          wait.release = undefined;
+        };
+        // Foreground children borrow the parent's run slot while it awaits them
+        // (acquireNestedSlot(true) is a deliberate no-op). Background children
+        // only register here and take their slot on the await path instead: the
+        // parent holds the run's only permit for the whole spawn, so acquiring
+        // here would deadlock a saturated cap.
+        if (hooks !== undefined) {
+          if (!invocation.runInBackground) {
+            try {
+              releaseNestedSlot = await hooks.acquireNestedSlot(!invocation.runInBackground);
+            } catch (err) {
+              return textResult(err instanceof Error ? err.message : String(err), true);
+            }
+          }
+          const registered = hooks.registerNested(
+            { label: params.description, agentType: resolvedType, promptPreview: params.prompt },
+            context.nestParentIndex,
+          );
+          if (!registered.ok) {
+            if (releaseNestedSlot !== undefined) {
+              releaseNestedSlot();
+              releaseNestedSlot = undefined;
+            }
+            return textResult(registered.error, true);
+          }
+          nestedIndex = registered.index;
+          if (invocation.runInBackground) {
+            backgroundWaitsByIndex.set(nestedIndex, { index: nestedIndex, settled: false });
+          }
         }
+        const nestedChildOptions =
+          hooks !== undefined && nestedIndex !== undefined
+            ? { ...options, nestingHooks: hooks, nestParentIndex: nestedIndex }
+            : options;
+        try {
+          if (invocation.runInBackground) {
+            const id = context.manager.spawn(context.pi, ctx, resolvedType, params.prompt, {
+              ...nestedChildOptions,
+              isBackground: true,
+              ...(hooks !== undefined && nestedIndex !== undefined
+                ? {
+                    onAgentSettled: (settled: AgentRecord) => {
+                      const succeeded = settled.status === "completed" || settled.status === "steered";
+                      settleBackgroundRow(nestedIndex, {
+                        ok: succeeded,
+                        ...(!succeeded ? { error: settled.error ?? `Agent ${settled.status}.` } : {}),
+                        tokens: getLifetimeTotal(settled.lifetimeUsage),
+                        toolCalls: settled.toolUses,
+                      });
+                    },
+                  }
+                : {}),
+            });
+            if (hooks !== undefined && nestedIndex !== undefined) {
+              hooks.updateNestedRecordId(nestedIndex, id);
+              context.manager.setNestParentIndex(id, nestedIndex);
+              const wait = backgroundWaitsByIndex.get(nestedIndex);
+              if (wait !== undefined) {
+                wait.recordId = id;
+                backgroundWaitsByRecord.set(id, wait);
+              }
+            }
+            // Synchronous, before the event loop yields — onSessionCreated fires
+            // asynchronously inside runAgent, so the file is attached in time.
+            attachTranscript(id);
+            // Worktree isolation starts the agent asynchronously; surface its
+            // failure as a tool error, like the synchronous throw used to.
+            await context.manager.awaitStartup(id);
+            return textResult(`Nested agent started in background. Agent ID: ${id}`);
+          }
 
-        const { record } = await context.manager.spawnAndWait(
-          context.pi,
-          ctx,
-          resolvedType,
-          params.prompt,
-          { ...options, signal },
-          attachTranscript,
-        );
-        return textResult(formatRecord(record, "inline"), record.status === "error");
+          const { record } = await context.manager.spawnAndWait(
+            context.pi,
+            ctx,
+            resolvedType,
+            params.prompt,
+            { ...nestedChildOptions, signal },
+            id => {
+              if (hooks !== undefined && nestedIndex !== undefined) {
+                hooks.updateNestedRecordId(nestedIndex, id);
+                context.manager.setNestParentIndex(id, nestedIndex);
+              }
+              attachTranscript(id);
+            },
+          );
+          if (hooks !== undefined && nestedIndex !== undefined) {
+            const succeeded = record.status === "completed" || record.status === "steered";
+            settleNestedChild({
+              ok: succeeded,
+              ...(!succeeded ? { error: record.error ?? `Agent ${record.status}.` } : {}),
+              tokens: getLifetimeTotal(record.lifetimeUsage),
+              toolCalls: record.toolUses,
+            });
+          }
+          return textResult(formatRecord(record, "inline"), record.status === "error");
+        } catch (err) {
+          // Early-settle-wins: a startup failure is terminal, so the row settles
+          // here and the manager's later settle for it is ignored.
+          if (hooks !== undefined && nestedIndex !== undefined) {
+            if (invocation.runInBackground) {
+              settleBackgroundRow(nestedIndex, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            } else if (!nestedSettled) {
+              settleNestedChild({ ok: false, error: err instanceof Error ? err.message : String(err) });
+            }
+          }
+          throw err;
+        }
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
       }
@@ -375,15 +516,34 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
+      const hooks = context.nestingHooks;
+      const waitEntry = hooks === undefined ? undefined : backgroundWaitsByRecord.get(params.agent_id);
       // Wait for completion if requested. Cancellation (e.g. the parent's tool
       // call is aborted) stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
+      // The run slot for a background grandchild is taken here, while the parent
+      // is parked awaiting it — never at spawn, where the parent still holds the
+      // run's only permit. Polls that never wait take no slot.
       if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
+        if (waitEntry !== undefined && hooks !== undefined && !waitEntry.settled && waitEntry.release === undefined) {
+          try {
+            waitEntry.release = await hooks.acquireNestedSlot(false);
+          } catch (err) {
+            return textResult(err instanceof Error ? err.message : String(err), true);
+          }
         }
-        if (record.promise) await abortable(record.promise, signal);
+        try {
+          while (record.status === "queued") {
+            await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
+          }
+          if (record.promise) await abortable(record.promise, signal);
+        } catch (err) {
+          // Aborting the wait releases the slot; the row stays open until the child settles.
+          waitEntry?.release?.();
+          if (waitEntry !== undefined) waitEntry.release = undefined;
+          throw err;
+        }
       }
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },

@@ -98,6 +98,8 @@ export interface WorkflowJournalEntry {
   ok: boolean;
   /** The agent's answer, when it had one. */
   text?: string;
+  /** The failure that settled the call, when it had one. Informational: failures never replay. */
+  error?: string;
   /**
    * Whether the call continued an earlier child (`agent({ resume })`).
    *

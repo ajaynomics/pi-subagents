@@ -27,7 +27,7 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { SubagentType, ThinkingLevel, WorkflowNestingHooks } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
@@ -489,6 +489,9 @@ export interface RunOptions {
     parentAgentId: string;
     depth: number;
     maxSubagentDepth?: number;
+    workflowId?: string;
+    nestingHooks?: WorkflowNestingHooks;
+    nestParentIndex?: number;
   };
 }
 
@@ -859,6 +862,9 @@ export async function runAgent(
         parentAgentId: nestedRuntime.parentAgentId,
         depth: nestedRuntime.depth,
         maxSubagentDepth: effectiveMaxDepth,
+        ...(nestedRuntime.workflowId !== undefined ? { workflowId: nestedRuntime.workflowId } : {}),
+        ...(nestedRuntime.nestingHooks !== undefined ? { nestingHooks: nestedRuntime.nestingHooks } : {}),
+        ...(nestedRuntime.nestParentIndex !== undefined ? { nestParentIndex: nestedRuntime.nestParentIndex } : {}),
         allowedSubagents: agentConfig.allowedSubagents,
         configCwd,
       })

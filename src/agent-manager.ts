@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel, WorkflowNestingHooks } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -297,6 +297,12 @@ interface SpawnOptions {
   parentAgentId?: string;
   /** Effective inherited nesting cap for this branch. */
   maxSubagentDepth?: number;
+  /** Workflow nesting hooks, present when the spawner belongs to a workflow run. */
+  nestingHooks?: WorkflowNestingHooks;
+  /** This agent's own progress index inside its run, for attributing grandchildren. */
+  nestParentIndex?: number;
+  /** Fired once when this agent settles, for releasing a nested concurrency slot. */
+  onAgentSettled?: (record: AgentRecord) => void;
   /** Config-discovery root inherited by nested launches when it differs from the working directory. */
   configCwd?: string;
   /** Root session id, inherited by nested launches so transcripts stay grouped. */
@@ -411,6 +417,12 @@ export class AgentManager {
   private runningBackground = 0;
   /** Number of currently running foreground (blocking) agents. */
   private runningForeground = 0;
+  /** Workflow nesting hooks by agent id, for attributing that agent's nested children. */
+  private nestingHooks = new Map<string, WorkflowNestingHooks>();
+  /** This agent's own progress index inside its run, for attributing grandchildren. */
+  private nestParentIndex = new Map<string, number>();
+  /** Per-agent settle callbacks, fired once from the shared settle tail. */
+  private settleHooks = new Map<string, (record: AgentRecord) => void>();
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -543,6 +555,9 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    if (options.nestingHooks !== undefined) this.nestingHooks.set(id, options.nestingHooks);
+    if (options.nestParentIndex !== undefined) this.nestParentIndex.set(id, options.nestParentIndex);
+    if (options.onAgentSettled !== undefined) this.settleHooks.set(id, options.onAgentSettled);
     // After the insert, so `takenHandles()` already counts this record's own
     // handle — a spawn named after its own type gets `explore-2`, not a
     // duplicate `explore` that would make resolution ambiguous.
@@ -802,6 +817,9 @@ export class AgentManager {
         parentAgentId: id,
         depth: record.depth ?? 1,
         maxSubagentDepth: record.maxSubagentDepth,
+        ...(record.workflowId !== undefined ? { workflowId: record.workflowId } : {}),
+        ...(this.nestingHooks.get(id) !== undefined ? { nestingHooks: this.nestingHooks.get(id) } : {}),
+        ...(this.nestParentIndex.get(id) !== undefined ? { nestParentIndex: this.nestParentIndex.get(id) } : {}),
       },
       onSessionCreated: (session) => {
         record.session = session;
@@ -969,6 +987,13 @@ export class AgentManager {
     if (!record.isBackground) record.resultConsumed = true;
     if (pool === "background") this.runningBackground--;
     else if (pool === "foreground") this.runningForeground--;
+    const settledHook = this.settleHooks.get(record.id);
+    if (settledHook !== undefined) {
+      this.settleHooks.delete(record.id);
+      try { settledHook(record); } catch { /* ignore per-agent settle side-effect errors */ }
+    }
+    this.nestingHooks.delete(record.id);
+    this.nestParentIndex.delete(record.id);
 
     if (guardCallback) {
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
@@ -1331,6 +1356,11 @@ export class AgentManager {
 
   getRecord(id: string): AgentRecord | undefined {
     return this.agents.get(id);
+  }
+
+  /** Correct a nested child's progress parent after its run row is allocated. */
+  setNestParentIndex(id: string, nestParentIndex: number): void {
+    if (this.agents.has(id)) this.nestParentIndex.set(id, nestParentIndex);
   }
 
   /** Handles already in use, so a fresh spawn can pick an unclaimed one. */
