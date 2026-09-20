@@ -1,0 +1,3 @@
+{"workflowJournalHeader":1,"resumeKey":"af3601714e24f6aa9ddac8d7e1e13231fa92ac9eb6d9362a84ea8da7b54ca6d2","runId":"wf_9300889399fe","createdAt":1789877888116}
+{"path":"#0","index":0,"key":"d538df9e470aa0b26ee57b86c0b675d7","ok":true,"text":"DEL_A"}
+{"path":"#1","index":1,"key":"18dd4b2052dc23a38c13e90bfd6b150d","ok":true,"text":"DEL_B:DEL_CHILD"}
