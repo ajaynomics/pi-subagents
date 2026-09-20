@@ -14,7 +14,7 @@
  * In-process assertions only: booted extensions, stub hosts and temp dirs.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -630,6 +630,58 @@ describe("cross-session resume", () => {
       // Equal totals (3 vs 3): total-count would tie-break to the newer failed
       // journal, but failures never replay — the complete one must win.
       expect(findJournalByResumeKey(cwd, key)).toBe(complete);
+    });
+
+    it("ignores garbage files while ranking real journals", () => {
+      // Session dirs accumulate whatever lands in them: foreign files, torn
+      // writes, pre-header journals. None of it may break the scan or
+      // outrank a real journal.
+      const key = workflowResumeKey(script, argsA);
+      const good = sessionJournal("sess-good", "wf_good");
+      writeJournalHeader(good, { resumeKey: key, runId: "wf_good", createdAt: 1 });
+      appendJournal(good, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
+
+      const junkTasks = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encoded, "sess-junk", "tasks");
+      mkdirSync(junkTasks, { recursive: true });
+      writeFileSync(join(junkTasks, "notes.txt"), "hello", "utf-8");
+      writeFileSync(join(junkTasks, "junk.workflow.jsonl"), "not json at all\n", "utf-8");
+      writeFileSync(join(junkTasks, "old.workflow.jsonl"), '{"path":"#0","index":0,"key":"k","ok":true}\n', "utf-8");
+      const other = join(junkTasks, "other.workflow.jsonl");
+      writeJournalHeader(other, { resumeKey: "0".repeat(64), runId: "wf_other", createdAt: 1 });
+      appendJournal(other, { path: "#0", index: 0, key: "k0", ok: true, text: "x" });
+      mkdirSync(join(junkTasks, "dir.workflow.jsonl"), { recursive: true });
+      writeFileSync(join(junkTasks, "empty.workflow.jsonl"), "", "utf-8");
+      const torn = join(junkTasks, "torn.workflow.jsonl");
+      writeJournalHeader(torn, { resumeKey: key, runId: "wf_torn", createdAt: 2 });
+      writeFileSync(torn, `${readFileSync(torn, "utf-8")}{"path":"#0","index":0,`, "utf-8");
+
+      // Force the good journal oldest: on coarse filesystem timestamps the
+      // junk could otherwise tie it, and a dropped key/header check would win
+      // by recency instead of going red.
+      utimesSync(good, 1000000, 1000000);
+
+      // A session directory without a tasks/ subdir at all.
+      mkdirSync(join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encoded, "sess-notasks"), { recursive: true });
+
+      expect(findJournalByResumeKey(cwd, key)).toBe(good);
+    });
+
+    it("counts only complete entries in a torn candidate", async () => {
+      // B's partial second line must not count: A (2 ok) beats B (1 ok plus
+      // a torn line) even though B is newer — if the partial counted, the tie
+      // would break to the newer file.
+      const key = workflowResumeKey(script, argsA);
+      const a = sessionJournal("sess-a", "wf_a");
+      writeJournalHeader(a, { resumeKey: key, runId: "wf_a", createdAt: 1 });
+      appendJournal(a, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
+      appendJournal(a, { path: "#1", index: 1, key: "k1", ok: true, text: "b" });
+      await new Promise(resolve => setTimeout(resolve, 25));
+      const b = sessionJournal("sess-b", "wf_b");
+      writeJournalHeader(b, { resumeKey: key, runId: "wf_b", createdAt: 2 });
+      appendJournal(b, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
+      writeFileSync(b, `${readFileSync(b, "utf-8")}{"path":"#1","index":1,"key":"k1","ok":true,`, "utf-8");
+
+      expect(findJournalByResumeKey(cwd, key)).toBe(a);
     });
 
     it("replays session A in session B with zero live spawns; changed args replay nothing", async () => {
