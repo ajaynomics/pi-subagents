@@ -71,7 +71,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { listSavedWorkflowDetails, resolveWorkflowScript, type SavedWorkflowDetail } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveKeyResumeTarget, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, isResumeKeyShape, resolveKeyResumeTarget, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -2412,20 +2412,18 @@ Terse command-style prompts produce shallow, generic work.
     const liveFrom = resolveResumeTarget(opts.resumeFromRunId, workflowTasks);
     if (liveFrom !== undefined && !liveFrom.ok) return { ok: false, message: liveFrom.message };
 
-    // A live run id wins over a persisted key when both are given — but a
-    // malformed key is still rejected, so a typo alongside a good id fails
-    // fast instead of silently dropping the key. A well-formed but unknown key
-    // only errors when it would actually be used, below.
-    const keyProbe = resolveKeyResumeTarget(opts.resumeFromKey, ctx.cwd);
+    // A live run id wins over a persisted key when both are given. The key is
+    // still shape-checked: a malformed key is certainly a typo (it can never
+    // match a journal) so it fails fast, while a well-formed but unknown key
+    // is ignored — its journal may simply have been swept, and the id path is
+    // unaffected. The full lookup (directory scan) runs only when no id was
+    // given, below.
     const keyText = opts.resumeFromKey?.trim() ?? "";
-    if (
-      keyProbe !== undefined &&
-      !keyProbe.ok &&
-      !/^[0-9a-f]{64}$/.test(keyText)
-    ) {
-      return { ok: false, message: keyProbe.message };
+    if (keyText !== "" && !isResumeKeyShape(keyText)) {
+      const malformed = resolveKeyResumeTarget(opts.resumeFromKey, ctx.cwd);
+      if (malformed !== undefined && !malformed.ok) return { ok: false, message: malformed.message };
     }
-    const keyFrom = liveFrom === undefined ? keyProbe : undefined;
+    const keyFrom = liveFrom === undefined ? resolveKeyResumeTarget(opts.resumeFromKey, ctx.cwd) : undefined;
     if (keyFrom !== undefined && !keyFrom.ok) return { ok: false, message: keyFrom.message };
     let resumeFrom: { runId: string; journalPath: string; scriptPath: string | undefined } | undefined;
     if (liveFrom?.ok) {

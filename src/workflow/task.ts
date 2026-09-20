@@ -279,6 +279,19 @@ export function resolveResumeTarget(
 }
 
 /**
+ * Whether a string is shaped like a resume key (64 lowercase hex chars).
+ *
+ * The cheap half of key validation: shape alone never touches the disk, so
+ * callers that only need fail-fast on typos use this without paying for
+ * {@link resolveKeyResumeTarget}'s directory scan. Mirrors that function's
+ * format check — keep the two in sync.
+ */
+export function isResumeKeyShape(key: string | undefined): boolean {
+  const trimmed = key?.trim() ?? "";
+  return /^[0-9a-f]{64}$/.test(trimmed);
+}
+
+/**
  * Resolve a `resumeFromKey` against journals on disk, across sessions.
  *
  * The key is the run's resume key — the sha256 of its script plus its args —
@@ -295,9 +308,9 @@ export function resolveKeyResumeTarget(
   | undefined
   | { ok: true; runId: string; journalPath: string }
   | { ok: false; message: string } {
-  const trimmed = key?.trim();
-  if (trimmed === undefined || trimmed === "") return undefined;
-  if (!/^[0-9a-f]{64}$/.test(trimmed)) {
+  const trimmed = key?.trim() ?? "";
+  if (trimmed === "") return undefined;
+  if (!isResumeKeyShape(trimmed)) {
     return {
       ok: false,
       message:

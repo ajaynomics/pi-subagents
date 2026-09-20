@@ -77,7 +77,8 @@
  * under a per-session directory. A new session finds an old journal by the
  * resume key instead: the sha256 of the script plus its args, stored in the
  * header and matched by {@link findJournalByResumeKey} across every session
- * directory for the project. Newest match wins.
+ * directory for the project. The most complete match wins (most successful
+ * entries; newest breaks ties).
  */
 
 import { createHash } from "node:crypto";
@@ -167,6 +168,22 @@ export function journalKey(input: JournalKeyInput): string {
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
 
+function parseJournalEntries(lines: string[]): WorkflowJournalEntry[] {
+  const parsed: WorkflowJournalEntry[] = [];
+  for (const line of lines) {
+    if (line.trim() === "") continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (!isEntry(value)) continue;
+      parsed.push(value);
+    } catch {
+      // A half-written final line, or someone editing the file. Skipping it
+      // keeps every other entry replayable.
+    }
+  }
+  return parsed;
+}
+
 /**
  * Read a journal file into arrival order.
  *
@@ -181,19 +198,7 @@ export function readJournal(path: string): WorkflowJournalEntry[] {
   } catch {
     return [];
   }
-
-  const entries: WorkflowJournalEntry[] = [];
-  for (const line of raw.split("\n")) {
-    if (line.trim() === "") continue;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (!isEntry(parsed)) continue;
-      entries.push(parsed);
-    } catch {
-      // A half-written final line, or someone editing the file. Skipping it
-      // keeps every other entry replayable.
-    }
-  }
+  const entries = parseJournalEntries(raw.split("\n"));
   entries.sort((a, b) => a.index - b.index);
   return entries;
 }
@@ -217,6 +222,7 @@ function isEntry(value: unknown): value is WorkflowJournalEntry {
     typeof entry.key === "string" &&
     typeof entry.ok === "boolean" &&
     (entry.text === undefined || typeof entry.text === "string") &&
+    (entry.error === undefined || typeof entry.error === "string") &&
     (entry.resumed === undefined || entry.resumed === true)
   );
 }
@@ -262,24 +268,15 @@ export function writeJournalHeader(path: string, header: WorkflowJournalHeader):
 }
 
 /**
- * Read the header line back. Never throws: a journal from before headers
- * existed, or one whose first line is an agent entry, simply has none.
+ * A journal header in one raw line, or undefined when the line is anything else.
+ *
+ * Never throws: a journal from before headers existed, or an agent entry,
+ * simply has none. Shared by {@link readJournalHeader} and the resume-key
+ * scanner so the two cannot disagree on what a header is.
  */
-export function readJournalHeader(path: string): WorkflowJournalHeader | undefined {
-  let first: string | undefined;
+function parseJournalHeaderLine(line: string): WorkflowJournalHeader | undefined {
   try {
-    const raw = readFileSync(path, "utf-8");
-    for (const line of raw.split("\n")) {
-      if (line.trim() === "") continue;
-      first = line;
-      break;
-    }
-  } catch {
-    return undefined;
-  }
-  if (first === undefined) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(first);
+    const parsed: unknown = JSON.parse(line);
     if (typeof parsed !== "object" || parsed === null) return undefined;
     const record = parsed as Record<string, unknown>;
     if (record[JOURNAL_HEADER_MARKER] !== 1) return undefined;
@@ -296,13 +293,32 @@ export function readJournalHeader(path: string): WorkflowJournalHeader | undefin
 }
 
 /**
+ * Read the header line back. Never throws: a journal from before headers
+ * existed, or one whose first line is an agent entry, simply has none.
+ */
+export function readJournalHeader(path: string): WorkflowJournalHeader | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch {
+    return undefined;
+  }
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") continue;
+    return parseJournalHeaderLine(line);
+  }
+  return undefined;
+}
+
+/**
  * Find a journal written for `resumeKey` under the same project.
  *
  * Journals live at `<tmp>/pi-subagents-<uid>/<encoded-cwd>/<session>/tasks/,
  * so a new session is a new directory: the scan covers every session directory
- * for this cwd and returns the match with the most journaled agent calls
- * (file mtime breaks ties), which is the most complete run of that script
- * plus args. Never throws: nothing found is undefined.
+ * for this cwd and returns the match with the most successful (`ok`) agent
+ * calls — a failed run's entries never replay, so they must not outrank a
+ * complete one — with file mtime breaking ties. Each candidate file is read
+ * once. Never throws: nothing found is undefined.
  */
 export function findJournalByResumeKey(cwd: string, resumeKey: string): string | undefined {
   let base: string;
@@ -318,7 +334,7 @@ export function findJournalByResumeKey(cwd: string, resumeKey: string): string |
     return undefined;
   }
   let best: string | undefined;
-  let bestCount = -1;
+  let bestOk = -1;
   let bestMtime = -1;
   for (const session of sessions) {
     const dir = join(base, session, "tasks");
@@ -331,17 +347,31 @@ export function findJournalByResumeKey(cwd: string, resumeKey: string): string |
     for (const file of files) {
       if (!file.endsWith(".workflow.jsonl")) continue;
       const path = join(dir, file);
-      const header = readJournalHeader(path);
+      let raw: string;
+      try {
+        raw = readFileSync(path, "utf-8");
+      } catch {
+        continue;
+      }
+      const lines = raw.split("\n");
+      let first: string | undefined;
+      for (const line of lines) {
+        if (line.trim() === "") continue;
+        first = line;
+        break;
+      }
+      if (first === undefined) continue;
+      const header = parseJournalHeaderLine(first);
       if (header?.resumeKey !== resumeKey) continue;
-      const count = readJournal(path).length;
+      const okCount = parseJournalEntries(lines).filter(entry => entry.ok).length;
       let mtime = 0;
       try {
         mtime = statSync(path).mtimeMs;
       } catch {
         continue;
       }
-      if (count > bestCount || (count === bestCount && mtime > bestMtime)) {
-        bestCount = count;
+      if (okCount > bestOk || (okCount === bestOk && mtime > bestMtime)) {
+        bestOk = okCount;
         bestMtime = mtime;
         best = path;
       }

@@ -14,8 +14,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { isSymlink } from "../memory.js";
 import type { AgentRecord } from "../types.js";
 import { sanitizeWorkflowSaveName, workflowSavePath } from "../workflow/saved.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
@@ -49,23 +50,37 @@ export interface WorkflowMenuDeps {
  * the inspector is also driven headless, where a prompt would hang — and the
  * caller reports that in its confirmation line. A different file under the same
  * name is left alone: the save goes to `<name>-2.js`, `<name>-3.js`, and so on.
- * Returns the written path and name, and whether it overwrote the same bytes.
+ * A symlinked `.pi/workflows` root is refused, as is an unreadable file:
+ * both name a state the save must not write through blindly. Returns the
+ * written path and name, and whether it overwrote the same bytes.
  */
 export function saveWorkflowRunScript(
   cwd: string,
   task: Pick<WorkflowTask, "id" | "script" | "meta">,
 ): { path: string; name: string; overwritten: boolean } {
+  const root = join(cwd, ".pi", "workflows");
+  // Mirror the listing: symlinked roots are never followed when reading, so
+  // a save must not write through one either.
+  if (isSymlink(root)) {
+    throw new Error(`refusing to save into symlinked directory ${root}`);
+  }
   const base = sanitizeWorkflowSaveName(task.meta?.name, task.id);
   mkdirSync(dirname(workflowSavePath(cwd, base)), { recursive: true });
   let name = base;
   let path = workflowSavePath(cwd, name);
   let counter = 1;
   while (existsSync(path)) {
-    let current: string | undefined;
+    let current: string;
     try {
       current = readFileSync(path, "utf-8");
-    } catch {
-      current = undefined;
+    } catch (error) {
+      // An unreadable file is refused, not suffixed: stamping `<name>-2.js`
+      // over bytes we could not read would pile numbered files onto an unknown
+      // state. The error names the path so a retry knows where to look.
+      throw new Error(
+        `cannot read existing workflow file at ${path}; refusing to overwrite blindly` +
+          (error instanceof Error ? `: ${error.message}` : ""),
+      );
     }
     if (current === task.script) {
       writeFileSync(path, task.script, "utf-8");
@@ -159,13 +174,22 @@ export async function showWorkflowDialog(
           onSave: () => {
             // No prompt: the inspector is also driven headless, where a
             // confirm would hang. Overwrite, and say so in the one-liner.
-            const saved = saveWorkflowRunScript(ctx.cwd, task);
-            ctx.ui.notify(
-              saved.overwritten
-                ? `Saved workflow "${saved.name}" to ${saved.path} (overwrote existing file).`
-                : `Saved workflow "${saved.name}" to ${saved.path}.`,
-              "info",
-            );
+            // Save failures (a symlinked root, an unreadable file) surface as
+            // a warning, never a throw through a keypress.
+            try {
+              const saved = saveWorkflowRunScript(ctx.cwd, task);
+              ctx.ui.notify(
+                saved.overwritten
+                  ? `Saved workflow "${saved.name}" to ${saved.path} (overwrote existing file).`
+                  : `Saved workflow "${saved.name}" to ${saved.path}.`,
+                "info",
+              );
+            } catch (error) {
+              ctx.ui.notify(
+                error instanceof Error ? error.message : String(error),
+                "warning",
+              );
+            }
           },
           onOpenAgent: recordId => {
             const record = deps.getRecord(recordId);

@@ -14,7 +14,7 @@
  * In-process assertions only: booted extensions, stub hosts and temp dirs.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -295,6 +295,20 @@ describe("inspector s saves the run", () => {
     }
   });
 
+  it("refuses an unreadable target instead of suffixing blindly", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "wf-save-unreadable-"));
+    try {
+      const script = 'export const meta = { name: "audit", description: "d" };\nreturn 1;\n';
+      mkdirSync(join(cwd, ".pi", "workflows", "audit.js"), { recursive: true });
+      expect(() =>
+        saveWorkflowRunScript(cwd, { id: "wf_abc", script, meta: { name: "audit", description: "d" } }),
+      ).toThrow(/refusing to overwrite blindly/);
+      expect(existsSync(join(cwd, ".pi", "workflows", "audit-2.js"))).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("suffixes a colliding name instead of overwriting different bytes", () => {
     const cwd = mkdtempSync(join(tmpdir(), "wf-save-collide-"));
     try {
@@ -317,6 +331,23 @@ describe("inspector s saves the run", () => {
       });
       expect(readFileSync(join(cwd, ".pi", "workflows", "audit.js"), "utf-8")).toContain("return 1;");
       expect(readFileSync(second.path, "utf-8")).toContain("return 2;");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a symlinked .pi/workflows root without writing through it", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "wf-save-link-"));
+    try {
+      const target = join(cwd, "real-target");
+      mkdirSync(target, { recursive: true });
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      symlinkSync(target, join(cwd, ".pi", "workflows"));
+      const script = 'export const meta = { name: "audit", description: "d" };\nreturn 1;\n';
+      expect(() =>
+        saveWorkflowRunScript(cwd, { id: "wf_abc", script, meta: { name: "audit", description: "d" } }),
+      ).toThrow(/symlinked directory/);
+      expect(existsSync(join(target, "audit.js"))).toBe(false);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -503,6 +534,22 @@ describe("cross-session resume", () => {
     }
   });
 
+  it("drops an entry line with a non-string error field", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wf-journal-baderror-"));
+    try {
+      const path = join(dir, "wf_err.workflow.jsonl");
+      writeFileSync(
+        path,
+        '{"path":"#0","index":0,"key":"k0","ok":true,"text":"kept"}\n' +
+          '{"path":"#1","index":1,"key":"k1","ok":false,"error":123}\n',
+        "utf-8",
+      );
+      expect(readJournal(path)).toEqual([{ path: "#0", index: 0, key: "k0", ok: true, text: "kept" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resolves a key against nothing, garbage and absence", () => {
     const cwd = mkdtempSync(join(tmpdir(), "wf-key-empty-"));
     try {
@@ -563,6 +610,25 @@ describe("cross-session resume", () => {
       writeJournalHeader(killed, { resumeKey: key, runId: "wf_killed", createdAt: 2 });
       appendJournal(killed, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
 
+      expect(findJournalByResumeKey(cwd, key)).toBe(complete);
+    });
+
+    it("prefers successful entries over failed ones at equal totals", async () => {
+      const key = workflowResumeKey(script, argsA);
+      const complete = sessionJournal("sess-ok", "wf_done");
+      writeJournalHeader(complete, { resumeKey: key, runId: "wf_done", createdAt: 1 });
+      appendJournal(complete, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
+      appendJournal(complete, { path: "#1", index: 1, key: "k1", ok: true, text: "b" });
+      appendJournal(complete, { path: "#2", index: 2, key: "k2", ok: true, text: "c" });
+      await new Promise(resolve => setTimeout(resolve, 25));
+      const failed = sessionJournal("sess-bad", "wf_broke");
+      writeJournalHeader(failed, { resumeKey: key, runId: "wf_broke", createdAt: 2 });
+      appendJournal(failed, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
+      appendJournal(failed, { path: "#1", index: 1, key: "k1", ok: true, text: "b" });
+      appendJournal(failed, { path: "#2", index: 2, key: "k2", ok: false });
+
+      // Equal totals (3 vs 3): total-count would tie-break to the newer failed
+      // journal, but failures never replay — the complete one must win.
       expect(findJournalByResumeKey(cwd, key)).toBe(complete);
     });
 
