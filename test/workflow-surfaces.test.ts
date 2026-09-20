@@ -166,41 +166,53 @@ describe("/workflows", () => {
     expect(String((sent[0] as { content?: unknown })?.content)).toContain("<result>T7</result>");
   });
 
-    it("passes nested, array, unicode, empty and absent args through verbatim", async () => {
-      seedRoots([
-        { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return JSON.stringify(args ?? null);") },
-      ]);
-      const cases: { label: string; input: string | undefined; expected: unknown }[] = [
-        { label: "nested", input: '{"a":{"b":[1,{"c":null}]}}', expected: { a: { b: [1, { c: null }] } } },
-        { label: "unicode", input: '{"emoji":"héllo wörld 🎉","esc":"a\\"b"}', expected: { emoji: "héllo wörld 🎉", esc: 'a"b' } },
-        { label: "empty", input: "{}", expected: {} },
-        { label: "absent", input: "", expected: null },
-      ];
-      for (const c of cases) {
-        const booted = bootWorkflows();
-        const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: c.input });
-        await booted.command.handler("", ui.context);
-        const started = ui.notes.find(note => note.text.includes("started in the background"));
-        const taskId = /Task ID: ([A-Za-z0-9_-]+)/.exec(started?.text ?? "")?.[1];
-        expect(taskId, `${c.label} launches`).toBeTruthy();
-        const sent = await awaitNotification(booted, taskId!);
-        const result = /<result>([\s\S]*)<\/result>/.exec(String((sent[0] as { content?: unknown })?.content))?.[1];
-        expect(JSON.parse(result ?? ""), `${c.label} args verbatim`).toEqual(c.expected);
-      }
-    });
-
-    it("refuses invalid JSON args without launching", async () => {
-      seedRoots([
-        { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return 1;") },
-      ]);
+  it("passes nested, array, unicode, empty and absent args through verbatim", async () => {
+    seedRoots([
+      { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return JSON.stringify(args ?? null);") },
+    ]);
+    const cases: { label: string; input: string | undefined; expected: unknown }[] = [
+      { label: "nested", input: '{"a":{"b":[1,{"c":null}]}}', expected: { a: { b: [1, { c: null }] } } },
+      { label: "unicode", input: '{"emoji":"héllo wörld 🎉","esc":"a\\"b"}', expected: { emoji: "héllo wörld 🎉", esc: 'a"b' } },
+      { label: "empty", input: "{}", expected: {} },
+      { label: "absent", input: "", expected: null },
+    ];
+    for (const c of cases) {
       const booted = bootWorkflows();
-      const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: "{oops" });
-
+      const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: c.input });
       await booted.command.handler("", ui.context);
+      const started = ui.notes.find(note => note.text.includes("started in the background"));
+      const taskId = /Task ID: ([A-Za-z0-9_-]+)/.exec(started?.text ?? "")?.[1];
+      expect(taskId, `${c.label} launches`).toBeTruthy();
+      const sent = await awaitNotification(booted, taskId!);
+      const result = /<result>([\s\S]*)<\/result>/.exec(String((sent[0] as { content?: unknown })?.content))?.[1];
+      expect(JSON.parse(result ?? ""), `${c.label} args verbatim`).toEqual(c.expected);
+    }
+  });
 
-      expect(ui.notes.some(note => note.text.includes("not valid JSON"))).toBe(true);
-      expect(ui.notes.some(note => note.text.includes("started in the background"))).toBe(false);
-    });
+  it("refuses invalid JSON args without launching", async () => {
+    seedRoots([
+      { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return 1;") },
+    ]);
+    const booted = bootWorkflows();
+    const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: "{oops" });
+
+    await booted.command.handler("", ui.context);
+
+    expect(ui.notes.some(note => note.text.includes("not valid JSON"))).toBe(true);
+    expect(ui.notes.some(note => note.text.includes("started in the background"))).toBe(false);
+  });
+
+  it("treats Esc on the args prompt as a cancel, not a launch with no args", async () => {
+    seedRoots([
+      { root: "project", name: "echo", content: workflowFile("echo", "Echo workflow", "return 1;") },
+    ]);
+    const booted = bootWorkflows();
+    const ui = commandCtx({ pick: options => options.find(option => option.includes("echo")), argsInput: undefined });
+
+    await booted.command.handler("", ui.context);
+
+    expect(ui.notes.some(note => note.text.includes("started in the background"))).toBe(false);
+  });
 
   describe("workflow completion notification", () => {
     function finishedTask(value: unknown, journalPath?: string) {
@@ -751,7 +763,7 @@ describe("cross-session resume", () => {
       expect(findJournalByResumeKey(cwd, key)).toBe(good);
     });
 
-    it("counts only complete entries in a torn candidate", async () => {
+    it("counts only complete entries in a torn candidate", () => {
       // B's partial second line must not count: A (2 ok) beats B (1 ok plus
       // a torn line) even though B is newer — if the partial counted, the tie
       // would break to the newer file.
@@ -760,11 +772,12 @@ describe("cross-session resume", () => {
       writeJournalHeader(a, { resumeKey: key, runId: "wf_a", createdAt: 1 });
       appendJournal(a, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
       appendJournal(a, { path: "#1", index: 1, key: "k1", ok: true, text: "b" });
-      await new Promise(resolve => setTimeout(resolve, 25));
       const b = sessionJournal("sess-b", "wf_b");
       writeJournalHeader(b, { resumeKey: key, runId: "wf_b", createdAt: 2 });
       appendJournal(b, { path: "#0", index: 0, key: "k0", ok: true, text: "a" });
       writeFileSync(b, `${readFileSync(b, "utf-8")}{"path":"#1","index":1,"key":"k1","ok":true,`, "utf-8");
+      // Force A oldest so B is unambiguously newer without sleeping on the clock.
+      utimesSync(a, 1000000, 1000000);
 
       expect(findJournalByResumeKey(cwd, key)).toBe(a);
     });
