@@ -346,6 +346,7 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
     `<task-id>${task.id}</task-id>`,
     task.toolCallId ? `<tool-use-id>${escapeXml(task.toolCallId)}</tool-use-id>` : null,
     task.scriptPath ? `<script>${escapeXml(task.scriptPath)}</script>` : null,
+    task.journalPath ? `<journal>${escapeXml(task.journalPath)}</journal>` : null,
     `<status>${escapeXml(status)}</status>`,
     `<summary>Workflow "${escapeXml(task.workflowName ?? task.id)}" ${task.status} — ${totals.done}/${totals.total} agents${
       task.replayedCount > 0 ? `, ${task.replayedCount} replayed from ${escapeXml(task.resumedFrom ?? "an earlier run")}` : ""

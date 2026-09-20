@@ -235,7 +235,7 @@ By default, foreground and background agents each stream their full conversation
   transcript: /tmp/pi-subagents-501/home-user-project/sess-1/tasks/agent-abc123.output
 ```
 
-Group completions render each agent as a separate block. The LLM receives structured `<task-notification>` XML for parsing, while the user sees the themed visual.
+Group completions render each agent as a separate block. The LLM receives structured `<task-notification>` XML for parsing, while the user sees the themed visual. A truncated `<result>` keeps its `...(truncated)` marker, and the notice names the run's `<journal>` file holding every agent's full text.
 
 ## Default Agent Types
 
