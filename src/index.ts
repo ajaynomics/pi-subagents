@@ -2770,11 +2770,52 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
-    const task = createWorkflowTask({ id: workflowRunId(), script, scriptPath: path, meta });
+    const runId = workflowRunId();
+    // Journaled like a tool launch, so a flag-started run is resumable and its
+    // answers replay: same header (resume key over the script plus no args),
+    // same append callback via the task record. Best-effort — without it the
+    // run still proceeds and Task ID is still reported, but no Resume key line
+    // is printed. (The tool path still reports a key even when persistence
+    // failed; the flag suppresses a key that would point at nothing. Align on
+    // suppression if the two are ever unified.) No saved .workflow.js copy:
+    // the flag source is always a file, so scriptPath already names the
+    // original; deleting that file loses the text, but the journal and key
+    // stay valid for callers that re-supply the script.
+    let journalPath: string | undefined;
+    let resumeKey: string | undefined;
+    try {
+      const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
+      journalPath = join(dir, `${runId}.workflow.jsonl`);
+      try {
+        resumeKey = workflowResumeKey(script, undefined);
+      } catch {
+        resumeKey = undefined;
+      }
+      if (resumeKey !== undefined) {
+        writeJournalHeader(journalPath, { resumeKey, runId, createdAt: Date.now() });
+      }
+    } catch (err) {
+      journalPath = undefined;
+      resumeKey = undefined;
+      console.warn(
+        `[pi-subagents] could not persist workflow journal: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const task = createWorkflowTask({
+      id: runId,
+      script,
+      scriptPath: path,
+      meta,
+      ...(journalPath !== undefined ? { journalPath } : {}),
+    });
     workflowTasks.set(task.id, task);
     widget.update();
     fleet.update();
     report(`Running workflow ${meta.name}…`, "info");
+    report(`Task ID: ${task.id}`, "info");
+    if (resumeKey !== undefined) {
+      report(`Resume key: ${resumeKey} — same script plus args with resumeFromKey replays this run from any session.`, "info");
+    }
 
     // Detached in TUI and RPC: session_start is awaited by the host, and a
     // workflow can run for minutes — blocking there would hold up the whole

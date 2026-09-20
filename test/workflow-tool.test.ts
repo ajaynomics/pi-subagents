@@ -26,6 +26,7 @@ import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
+import { findJournalByResumeKey, readJournal, readJournalHeader, workflowResumeKey } from "../src/workflow/journal.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 import type { WorkflowSpawnRequest } from "../src/workflow/runtime.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
@@ -1245,6 +1246,39 @@ describe("--subagents-workflow-file", () => {
     expect(text).toContain("from-file");
     expect(text).toContain("step");
     expect(text).toContain("1/1 agent");
+  });
+
+  it("journals the flag-started run with a header and reports its id and key", async () => {
+    const path = join(hermetic.dir, "flow.js");
+    const script = 'export const meta = { name: "flag-journal", description: "d" };\nreturn "done";\n';
+    writeFileSync(path, script, "utf-8");
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await booted.lifecycle.get("session_start")?.({}, ctx({ cwd: hermetic.dir, hasUI: false }));
+      await vi.waitFor(
+        () =>
+          expect(booted.pi.appendEntry).toHaveBeenCalledWith(
+            WORKFLOW_ENTRY_TYPE,
+            expect.objectContaining({ status: "completed" }),
+          ),
+        { timeout: 10_000 },
+      );
+      const warns = warn.mock.calls.map(call => String(call[0]));
+      const runId = /\[pi-subagents\] Task ID: (\S+)/.exec(warns.join("\n"))?.[1];
+      expect(runId, "flag run must report its task id").toBeTruthy();
+      const expectedKey = workflowResumeKey(script, undefined);
+      expect(warns.join("\n")).toContain(`Resume key: ${expectedKey}`);
+      expect(warns.join("\n")).toContain("same script plus args with resumeFromKey");
+      const found = findJournalByResumeKey(hermetic.dir, expectedKey);
+      expect(found, "journal must be findable by its resume key").toBeTruthy();
+      expect(readJournalHeader(found!)).toMatchObject({ resumeKey: expectedKey, runId: runId! });
+      // A script with no agents journals nothing but the header.
+      expect(readJournal(found!)).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

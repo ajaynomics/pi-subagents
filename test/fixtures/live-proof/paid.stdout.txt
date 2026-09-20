@@ -1,0 +1,50 @@
+[pi-subagents] Running workflow live-proof…
+[pi-subagents] Task ID: wf_d975d29936f2
+[pi-subagents] Resume key: cd7762037cd2ddab502d7d8fddd3f3073733f05ec9d0be7f1d35f795dbd91f4c — same script plus args with resumeFromKey replays this run from any session.
+**Workflow "live-proof" completed successfully.**
+
+- **Agents:** 18/90 (partial run)
+- **Duration:** ~70 seconds
+- **Tokens:** 52.6K
+
+**Result structure:**
+- Root survey with two main branches (root.0, root.1)
+- Each branch split into two sub-surveys with 2 leaf tasks each (8 leaves total)
+- Worklist: 3 items processed (w1, w1b, w2)
+- All tasks and surveys completed with results captured
+
+The workflow executed a hierarchical task tree with intermediate survey nodes and terminal leaf results, plus a dynamic worklist component.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: runtime cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.
+MCP: session shutdown cleanup failed: Cannot access 'scopedMaterializedResourceSessions' before initialization.

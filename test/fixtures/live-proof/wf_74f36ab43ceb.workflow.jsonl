@@ -1,0 +1,9 @@
+{"workflowJournalHeader":1,"resumeKey":"cf1eae9b63761ed97457ea7c45db1a0e2c7482eee712fc21f5795281eaa4f1ae","runId":"wf_74f36ab43ceb","createdAt":1789876829302}
+{"path":"#0","index":0,"key":"2252fee2b6222ee7a3a1591eb31142ba","ok":true,"text":"SURV_root"}
+{"path":"/1:w#0","index":1,"key":"38dc824393d262619984589985673b53","ok":true,"text":"SURV_root_0"}
+{"path":"/1:w/1:w#0","index":2,"key":"d57ccc79bf188a2289984c291d95e402","ok":true,"text":"SURV_root_0_0"}
+{"path":"/1:w/1:w/1:w#0","index":3,"key":"105da6ecc605da6e40e0aac7cd9854b6","ok":true,"text":"LEAF_root_0_0_0"}
+{"path":"/1:w/1:w/2:w#0","index":4,"key":"6e45a8f9f03eab5e2d2648ae91e16a0a","ok":true,"text":"LEAF_root_0_0_1"}
+{"path":"/1:w/2:w#0","index":5,"key":"1ff6d8dac424a429adf08fbc2b0bfa95","ok":true,"text":"SURV_root_0_1"}
+{"path":"/1:w/2:w/1:w#0","index":6,"key":"336af3e2a72c306fe773204ff7502561","ok":true,"text":"LEAF_root_0_1_0"}
+{"path":"/1:w/2:w/2:w#0","index":7,"key":"121db5d613136bf7a797458aa8d49a3d","ok":true,"text":"LEAF_root_0_1_1"}
