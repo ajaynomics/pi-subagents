@@ -10,7 +10,7 @@
  *  │   2 Verify   1/2 │                                                │
  *  │   3 Report       │                                                │
  *  ╰──────────────────┴────────────────────────────────────────────────╯
- *  ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
+ *  ↑↓ select · ⏎ open · f filter · s save · x stop · esc close · c convo
  * ```
  *
  * Opening an agent swaps the panes: that phase's agents move left and the
@@ -321,6 +321,11 @@ export interface WorkflowDialogActions {
   onSkipAgent?(index: number): void;
   onRetryAgent?(index: number): void;
   /**
+   * Save the run's script to `.pi/workflows/`. Offered at the overview, where
+   * `s` is free — in the subview `s` keeps skipping the selected agent.
+   */
+  onSave?(): void;
+  /**
    * Open the selected agent's conversation.
    *
    * `recordId` is the manager's id for the child, which the entry carries once
@@ -338,7 +343,8 @@ export type WorkflowDialogAction =
   | { kind: "resume" }
   | { kind: "skip"; index: number }
   | { kind: "retry"; index: number }
-  | { kind: "open"; recordId: string };
+  | { kind: "open"; recordId: string }
+  | { kind: "save" };
 
 export interface ResolvedWorkflowDialog {
   groups: PhaseGroup[];
@@ -884,6 +890,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
     hints.push(`${glyphs.upDown} select`);
     if (view.visibleAgents.length > 0) hints.push(`${glyphs.enter} open`);
     hints.push("f filter");
+    if (can("onSave")) hints.push("s save");
   } else {
     hints.push(`${glyphs.upDown} agent`);
     if (previewLines(entry?.promptPreview).length > PROMPT_COLLAPSED_LINES) {
@@ -1003,6 +1010,12 @@ export function handleWorkflowDialogKey(
     if (!view.workflowActive) return undefined;
     return { state, action: { kind: view.paused ? "resume" : "pause" } };
   }
+  // At the overview `s` saves the run's script; in the subview it keeps its
+  // skip meaning, where the footer advertises it. Skip stays gated on a live
+  // agent, while there is always a script worth saving.
+  if (matchesKey(data, "s") && state.level === "phases") {
+    return { state, action: { kind: "save" } };
+  }
   const actions = agentActions(view.selectedEntry, view.workflowActive);
   if (matchesKey(data, "s") && actions.skip && view.selectedEntry) {
     return { state, action: { kind: "skip", index: view.selectedEntry.index } };
@@ -1074,6 +1087,7 @@ export class WorkflowDialog implements Component {
         onSkipAgent: this.actions.onSkipAgent !== undefined,
         onRetryAgent: this.actions.onRetryAgent !== undefined,
         onOpenAgent: this.actions.onOpenAgent !== undefined,
+        onSave: this.actions.onSave !== undefined,
       },
       width,
       spinnerFrame: this.spinnerFrame,
@@ -1113,6 +1127,9 @@ export class WorkflowDialog implements Component {
         return;
       case "retry":
         this.actions.onRetryAgent?.(action.index);
+        return;
+      case "save":
+        this.actions.onSave?.();
         return;
       case "open":
         this.actions.onOpenAgent?.(action.recordId);

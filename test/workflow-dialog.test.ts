@@ -930,6 +930,7 @@ describe("WorkflowDialog component", () => {
         onPause: () => calls.push("pause"),
         onSkipAgent: (index: number) => calls.push(`skip:${index}`),
         onRetryAgent: (index: number) => calls.push(`retry:${index}`),
+        onSave: () => calls.push("save"),
         onOpenAgent: (recordId: string) => calls.push(`open:${recordId}`),
       },
     );
@@ -951,9 +952,15 @@ describe("WorkflowDialog component", () => {
     const { dialog: instance, calls, closed } = harness(liveSource);
     instance.handleInput("x");
     instance.handleInput("p");
+    // At the overview `s` saves the run; skip lives in the subview.
     instance.handleInput("s");
     instance.handleInput("r");
-    expect(calls.filter(c => c !== "render")).toEqual(["kill", "pause", "skip:7", "retry:7"]);
+    expect(calls.filter(c => c !== "render")).toEqual(["kill", "pause", "save", "retry:7"]);
+    expect(closed).toHaveLength(0);
+    instance.handleInput("\r");
+    instance.handleInput("s");
+    expect(calls.filter(c => c !== "render")).toEqual(["kill", "pause", "save", "retry:7", "skip:7"]);
+    instance.handleInput("\x1b");
     expect(closed).toHaveLength(0);
     instance.handleInput("\x1b");
     expect(closed).toEqual([true]);

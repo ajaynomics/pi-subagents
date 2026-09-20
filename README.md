@@ -483,6 +483,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 | Command | Description |
 |---------|-------------|
 | `/agents` | Interactive agent management menu — agent types, running agents, scheduled jobs, workflow runs, settings |
+| `/workflows` | Pick a saved workflow (`.pi/workflows/`, `.agents/workflows/`, global) and run it with JSON args |
 
 `/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a framed two-pane inspector over a run, with two levels of depth:
 
@@ -496,18 +497,19 @@ Send a steering message to a running agent. The message interrupts after the cur
  │   3 Verify       │                                                                  │
  │   4 Synthesize   │                                                                  │
  ╰──────────────────┴──────────────────────────────────────────────────────────────────╯
- ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
+ ↑↓ select · ⏎ open · f filter · s save · x stop · esc close · c convo
 ```
 
 The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `⏎` now expanding the prompt and `esc` going back a level rather than closing. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay, like the conversation viewer an agent row opens; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
 
-The run itself takes five keys, and the footer offers each only while it can actually do something:
+The run itself takes six keys, and the footer offers each only while it can actually do something (`s` does two jobs: save at the overview, skip in the agent detail):
 
 | Key | What it does |
 |-----|--------------|
 | `x` | Stop the run. Live runs only — a settled one has nothing left to stop |
 | `p` | Pause / resume. Pausing stops *starting* agents; ones already running are left to finish, because killing model work mid-turn throws away everything it has spent. Held time is subtracted from the run's elapsed clock |
-| `s` | Skip the selected agent: its `agent()` call returns `null`, exactly as a terminal failure does, and the row renders skipped. Offered while the agent is queued or running |
+| `s` (overview) | Save the run's script to `.pi/workflows/<name>.js` — the meta name sanitized to a filename, or the run id when the meta has no usable name. Byte-identical and re-runnable via `{ name }`; an existing file is overwritten without asking, and the confirmation line says so |
+| `s` (agent detail) | Skip the selected agent: its `agent()` call returns `null`, exactly as a terminal failure does, and the row renders skipped. Offered while the agent is queued or running |
 | `r` | Retry the selected agent: the child is stopped and the same call runs again, so the script's `agent()` promise is still the one waiting and gets the new answer. Running agents only — once a call has settled its value is already the script's, and a re-run would have nowhere to put one. The row then reads `attempt 2 · user retry` |
 | `c` | Open the selected agent's **conversation** — the same live, scrolling viewer a fleet-list row opens, over the dialog, which hides itself underneath and comes back when you close it. The one key here that shows something rather than changing the run, so it works at both levels and on an agent that has already finished; reading what a child actually did is most of why anyone opens the inspector. Offered once the child has a record to open, which excludes a queued agent and one replayed from the resume journal. Records are swept ten minutes after they finish, and the key says so rather than opening an empty viewer |
 

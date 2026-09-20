@@ -8,14 +8,16 @@
  * and both go through `showWorkflowDialog`, so the two entry points cannot
  * drift apart on what the keys do.
  *
- * Lives in the agents menu rather than as a top-level `/workflows` command: it
- * is one more view of the same fleet, and a second command name would only add
- * a collision surface (pi renames duplicate commands to `/workflows:1` and
- * `/workflows:2`, which breaks the bare name for both).
+ * This menu is the run inspector, not a workflow launcher: it only ever shows
+ * runs already in the session. Launching a saved workflow is the top-level
+ * `/workflows` command's job.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
+import { sanitizeWorkflowSaveName, workflowSavePath } from "../workflow/saved.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
 import { WorkflowDialog } from "./workflow-dialog.js";
 
@@ -37,6 +39,44 @@ export interface WorkflowMenuDeps {
    * sessions, which is a no-op rather than an error.
    */
   getCtx(): ExtensionCommandContext | undefined;
+}
+
+/**
+ * Save a run's script into `.pi/workflows/`, for the inspector's `s` key.
+ *
+ * The file is byte-identical to the run's script, so it re-runs via `{ name }`
+ * or `scriptPath` unchanged. An identical file is overwritten without asking —
+ * the inspector is also driven headless, where a prompt would hang — and the
+ * caller reports that in its confirmation line. A different file under the same
+ * name is left alone: the save goes to `<name>-2.js`, `<name>-3.js`, and so on.
+ * Returns the written path and name, and whether it overwrote the same bytes.
+ */
+export function saveWorkflowRunScript(
+  cwd: string,
+  task: Pick<WorkflowTask, "id" | "script" | "meta">,
+): { path: string; name: string; overwritten: boolean } {
+  const base = sanitizeWorkflowSaveName(task.meta?.name, task.id);
+  mkdirSync(dirname(workflowSavePath(cwd, base)), { recursive: true });
+  let name = base;
+  let path = workflowSavePath(cwd, name);
+  let counter = 1;
+  while (existsSync(path)) {
+    let current: string | undefined;
+    try {
+      current = readFileSync(path, "utf-8");
+    } catch {
+      current = undefined;
+    }
+    if (current === task.script) {
+      writeFileSync(path, task.script, "utf-8");
+      return { path, name, overwritten: true };
+    }
+    counter += 1;
+    name = `${base}-${counter}`;
+    path = workflowSavePath(cwd, name);
+  }
+  writeFileSync(path, task.script, "utf-8");
+  return { path, name, overwritten: false };
 }
 
 /**
@@ -115,6 +155,17 @@ export async function showWorkflowDialog(
               // there is nothing to stop, after it the script has its answer.
               ctx.ui.notify("Only a running agent can be retried.", "info");
             }
+          },
+          onSave: () => {
+            // No prompt: the inspector is also driven headless, where a
+            // confirm would hang. Overwrite, and say so in the one-liner.
+            const saved = saveWorkflowRunScript(ctx.cwd, task);
+            ctx.ui.notify(
+              saved.overwritten
+                ? `Saved workflow "${saved.name}" to ${saved.path} (overwrote existing file).`
+                : `Saved workflow "${saved.name}" to ${saved.path}.`,
+              "info",
+            );
           },
           onOpenAgent: recordId => {
             const record = deps.getRecord(recordId);

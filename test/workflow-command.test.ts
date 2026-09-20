@@ -91,12 +91,11 @@ describe("/agents → Workflows", () => {
   beforeEach(() => { hermetic = hermeticDir({ settings: { workflowsEnabled: true } }); });
   afterEach(() => { hermetic.restore(); });
 
-  it("registers no top-level /workflows command", () => {
-    // It lives under /agents instead, deliberately: pi renames a duplicate
-    // command to `/workflows:1` and `/workflows:2`, which breaks the bare name
-    // for both extensions. Pinned because re-adding it would be silent.
+  it("registers a top-level /workflows command", () => {
+    // The run inspector lives under /agents → Workflows; launching a saved
+    // workflow is the top-level command's job.
     const booted = bootCommand();
-    expect(booted.commands.has("workflows")).toBe(false);
+    expect(booted.commands.has("workflows")).toBe(true);
   });
 
   it("offers the entry in the agents menu", async () => {

@@ -107,12 +107,22 @@ A change invalidates the chain it is in, and the chains nested inside it, from t
 
 Four things it will not do:
 
-- **Cross sessions.** The journal is keyed to the session that wrote it. Restart pi and the run id is dead — you get `No workflow run "<id>" in this session.`
+- **Cross sessions without the key.** A run id only resolves in the session that ran it — restart pi and the id is dead (`No workflow run "<id>" in this session`). With the run's resume key (`resumeFromKey`, below) the same replay works from any session.
 - **Resume a live run.** Stop it from `/agents → Workflows` first; while it is running you get `Workflow "<id>" is still running.`
 - **Replay a failure.** A journaled failure is never replayed, so resuming a run that died at agent 5 retries exactly agent 5 and re-runs what followed it in that chain. That is the point.
 - **Replay a run that used `agent({ resume })` at all.** A replayed agent is text from a file rather than a live child, so there would be no conversation left for a later `resume` to continue.
 
-Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, re-runs that run's own script.
+Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, re-runs that run's own script. Passing `resumeFromKey` with identical script and args replays across sessions — see below.
+
+### Resuming from another session
+
+A run id dies with its session; the resume key does not. Every journal's first line is a header carrying the run's key — `sha256(JSON.stringify([script, argsJson]))` as 64 lowercase hex chars, where `argsJson` is `"null"` for no args and `JSON.stringify(args)` otherwise (JSON key order matters, so the same args in a different key order are a different key). The start text reports it as `Resume key:` — pass it back with identical script and args:
+
+```js
+SubagentWorkflow({ script, args, resumeFromKey: "<64 hex>" })
+```
+
+The lookup scans every session directory for the project and replays the most complete journal with that key — most recorded calls wins, newest breaks ties; changed args are a different key and replay nothing. Precedence is explicit: a live run id wins, so when `resumeFromRunId` is given the key is ignored (a malformed key still errors), and same-session behavior is otherwise unchanged — unknown ids still error, live runs still refuse, failures still never replay, and a journal from before headers existed simply has no key.
 
 ### 5. Save it
 
@@ -130,7 +140,7 @@ The file must carry an `export const meta = { name, description }` declaration. 
 
 Then invoke it by name: *"run the auth-audit workflow"*. The model passes `name: "auth-audit"` and the run reports that file back as its `Script:`, so the edit-and-re-run loop still works on it.
 
-**Nothing lists your saved workflows for you.** `/agents → Workflows` is a *run* inspector scoped to the current session, not a workflow browser — with five workflows saved on disk it will show you nothing. You reach a saved workflow by naming it to the model, or with [`--subagents-workflow-file=`](../README.md#cli-flags). Keeping the names memorable is on you.
+**`/workflows` lists your saved workflows for you.** Name, description, winning source dir and whether each reads `args`; pick one, hand it JSON args at the prompt, and it launches with the same semantics as `SubagentWorkflow({ name, args })`. `/agents → Workflows` stays a *run* inspector scoped to the current session — it shows runs, not saved files. You can also name a workflow to the model, or run a file with [`--subagents-workflow-file=`](../README.md#cli-flags).
 
 ### 6. Parameterize it
 
@@ -226,6 +236,7 @@ export const meta = {
 | `name` | string | A saved workflow — `<name>.js` in one of the three directories above. Lowest precedence |
 | `args` | any | Handed to the script as the `args` global, verbatim. Must be JSON-shaped |
 | `resumeFromRunId` | string | Replay an earlier run in this session. Matches `^wf_[a-z0-9-]{6,}$` |
+| `resumeFromKey` | string | Replay an earlier run from any session, by its 64-char resume key (sha256 of script plus args). A run id wins when both are given |
 | `title` / `description` | string | Accepted and ignored — for Claude Code parity, so a ported call does not fail. A workflow is named by its `meta` block |
 
 At least one of `script` / `scriptPath` / `name` is required; `scriptPath` wins over `script`, which wins over `name`.
@@ -299,10 +310,16 @@ Nested children count toward the run's agent cap, and a nested breach fails the 
 | What | Where |
 |---|---|
 | An inline script, as run | `<tmp>/pi-subagents-<uid>/<encoded-cwd>/<session>/tasks/<run id>.workflow.js` |
-| The resume journal | the same directory, `<run id>.workflow.jsonl` |
+| The resume journal | the same directory, `<run id>.workflow.jsonl` — first line is a header with the run's resume key |
 | Saved workflows | `.pi/workflows/` → `.agents/workflows/` → `<agent dir>/workflows/`, first hit wins |
 
-The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only the third is durable, and copying a script there is a manual step.
+The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only the third is durable, and copying a script there is a manual step (the inspector's `s` does it for the run you are viewing). While the scratch survives, any session finds a journal by its resume key — see below.
+
+### Running a saved workflow
+
+`/workflows` lists every saved workflow — name, description, winning source dir (project shadows global) and whether it reads `args` — and launches the pick with JSON args you type at the prompt. Args pass through verbatim, exactly as `SubagentWorkflow({ name, args })`. With nothing saved it says where to put one; with workflows off it refuses and points at the setting.
+
+From the run inspector, `s` at the overview saves the viewed run's script to `.pi/workflows/<name>.js` — the meta name sanitized to a filename, the run id when the meta has none usable. The file is byte-identical to the run's script and re-runs via `{ name }`; an identical file is overwritten without asking (the inspector is also driven headless), and the confirmation line says so — a different file under the same name is left alone and the save goes to `<name>-2.js` instead. In the agent detail `s` keeps skipping the selected agent.
 
 ### Limits and caps
 

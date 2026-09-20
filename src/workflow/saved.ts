@@ -41,7 +41,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isSymlink, isUnsafeName, safeReadFile } from "../memory.js";
-import { hasMetaDeclaration } from "./meta.js";
+import { extractMeta, hasMetaDeclaration } from "./meta.js";
 import { MAX_SCRIPT_LENGTH } from "./runtime.js";
 
 /** Extension a saved workflow file carries. */
@@ -214,4 +214,93 @@ export function resolveWorkflowScript(
       "`scriptPath` takes precedence, then `script`, then `name`." +
       (known.length > 0 ? ` Saved workflows: ${known.join(", ")}.` : ""),
   };
+}
+
+/** A saved workflow as the `/workflows` picker shows it. */
+export interface SavedWorkflowDetail {
+  /** File name without `.js` — what `{ name }` resolves. */
+  name: string;
+  /** From the `meta` block. */
+  description: string;
+  /** The root that won the name, highest priority first. */
+  sourceDir: string;
+  /** Full path of that file. */
+  path: string;
+  /**
+   * Whether the source mentions the `args` global. A listing hint only — the
+   * check is textual, so a comment about args reads as taking them.
+   */
+  takesArgs: boolean;
+}
+
+/**
+ * Every saved workflow with its description and source, for `/workflows`.
+ *
+ * Same roots and first-hit-wins precedence as {@link readSavedWorkflow}, so
+ * the picker offers exactly what a name would resolve to. Only files whose
+ * `meta` block parses are listed: the picker launches what it offers, and a
+ * file that would fail extraction is an error message, not a choice.
+ */
+export function listSavedWorkflowDetails(cwd: string): SavedWorkflowDetail[] {
+  const details = new Map<string, SavedWorkflowDetail>();
+  for (const root of savedWorkflowRoots(cwd)) {
+    if (!existsSync(root) || isSymlink(root)) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue; // an unreadable root is not worth failing a listing over
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(WORKFLOW_EXTENSION)) continue;
+      const name = entry.slice(0, -WORKFLOW_EXTENSION.length);
+      if (isUnsafeName(name) || details.has(name)) continue;
+      const path = join(root, entry);
+      try {
+        if (statSync(path).size > MAX_SCRIPT_LENGTH) continue;
+      } catch {
+        continue;
+      }
+      const script = safeReadFile(path);
+      if (script === undefined || !hasMetaDeclaration(script)) continue;
+      let description: string;
+      try {
+        description = extractMeta(script).meta.description;
+      } catch {
+        continue; // listed nowhere, but naming it still reports why
+      }
+      details.set(name, {
+        name,
+        description,
+        sourceDir: root,
+        path,
+        takesArgs: /\bargs\b/.test(script),
+      });
+    }
+  }
+  return [...details.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/**
+ * File name to save a run's script under.
+ *
+ * The run's meta name, reduced to the whitelist saved names resolve through
+ * (a single trailing `.js` is stripped, so `foo.js` saves as `foo.js` rather
+ * than `foo.js.js`); anything without a usable name falls back to the run id,
+ * which always passes. The saved file stays byte-identical to the run's
+ * script, so it re-runs via `{ name }` or `scriptPath` unchanged.
+ */
+export function sanitizeWorkflowSaveName(metaName: string | undefined, runId: string): string {
+  const slug = (metaName ?? "")
+    .trim()
+    .replace(/\.js$/, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 128);
+  return slug !== "" && !isUnsafeName(slug) ? slug : runId;
+}
+
+/** Where the inspector's `s` key writes a run's script. */
+export function workflowSavePath(cwd: string, name: string): string {
+  return join(cwd, ".pi", "workflows", `${name}${WORKFLOW_EXTENSION}`);
 }

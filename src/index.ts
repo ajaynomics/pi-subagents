@@ -8,6 +8,7 @@
  *
  * Commands:
  *   /agents                 — Interactive agent management menu
+ *   /workflows              — Pick a saved workflow and run it
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -56,7 +57,7 @@ import {
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
-import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
+import { FleetList, type FleetUICtx, type FleetWorkflow, taskToFleetWorkflow } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
@@ -65,12 +66,12 @@ import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type Lifet
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
 import { createWorkflowHost } from "./workflow/host.js";
-import { appendJournal, readJournal, type WorkflowJournalEntry } from "./workflow/journal.js";
+import { appendJournal, readJournal, type WorkflowJournalEntry, workflowResumeKey, writeJournalHeader } from "./workflow/journal.js";
 import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/meta.js";
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
-import { resolveWorkflowScript } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { listSavedWorkflowDetails, resolveWorkflowScript, type SavedWorkflowDetail } from "./workflow/saved.js";
+import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveKeyResumeTarget, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -2316,25 +2317,12 @@ Terse command-style prompts produce shallow, generic work.
   /**
    * Workflow runs as the fleet list wants them.
    *
-   * Mapped here rather than handing `WorkflowTask` over the seam: the list is
-   * deliberately ignorant of the workflow engine, and a run's counters live in
-   * the progress log rather than on the record, so they are derived per call
-   * the same way the card derives them.
+   * Mapped through `taskToFleetWorkflow` rather than handing `WorkflowTask`
+   * over the seam: the list stays ignorant of the workflow engine, and the
+   * counts live in one tested place.
    */
   function fleetWorkflows(): FleetWorkflow[] {
-    // Cached counters only, no derivation: the fleet list calls this on a
-    // 200ms tick and reads the roster several times per update, so walking a
-    // run's progress log here would put O(log) work in the render loop.
-    return [...workflowTasks.values()].map(task => ({
-      id: task.id,
-      name: task.meta?.name ?? task.workflowName ?? task.id,
-      status: task.status,
-      doneCount: task.doneCount,
-      totalCount: task.agentCount,
-      startedAt: task.startTime,
-      ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
-      tokens: task.totalTokens,
-    }));
+    return [...workflowTasks.values()].map(taskToFleetWorkflow);
   }
 
   /**
@@ -2404,6 +2392,137 @@ Terse command-style prompts produce shallow, generic work.
     });
   }
 
+  /**
+   * Start a workflow run from any entry point — the `SubagentWorkflow` tool or
+   * the `/workflows` command — and register it the same way.
+   *
+   * One function so the two cannot drift on precedence (`scriptPath` over
+   * `script` over `name`), on resume (a live run id first, then a persisted
+   * resume key), or on what gets persisted beside the run. Returns the task
+   * for the caller to report; the run itself proceeds in the background.
+   */
+  async function launchWorkflowRun(
+    source: { script?: string; scriptPath?: string; name?: string },
+    opts: { args?: unknown; resumeFromRunId?: string; resumeFromKey?: string; toolCallId?: string },
+    ctx: ExtensionContext,
+  ): Promise<
+    | { ok: true; task: WorkflowTask; meta: WorkflowMeta; resumeKey: string | undefined; replayNote: string }
+    | { ok: false; message: string }
+  > {
+    const liveFrom = resolveResumeTarget(opts.resumeFromRunId, workflowTasks);
+    if (liveFrom !== undefined && !liveFrom.ok) return { ok: false, message: liveFrom.message };
+
+    // A live run id wins over a persisted key when both are given — but a
+    // malformed key is still rejected, so a typo alongside a good id fails
+    // fast instead of silently dropping the key. A well-formed but unknown key
+    // only errors when it would actually be used, below.
+    const keyProbe = resolveKeyResumeTarget(opts.resumeFromKey, ctx.cwd);
+    const keyText = opts.resumeFromKey?.trim() ?? "";
+    if (
+      keyProbe !== undefined &&
+      !keyProbe.ok &&
+      !/^[0-9a-f]{64}$/.test(keyText)
+    ) {
+      return { ok: false, message: keyProbe.message };
+    }
+    const keyFrom = liveFrom === undefined ? keyProbe : undefined;
+    if (keyFrom !== undefined && !keyFrom.ok) return { ok: false, message: keyFrom.message };
+    let resumeFrom: { runId: string; journalPath: string; scriptPath: string | undefined } | undefined;
+    if (liveFrom?.ok) {
+      resumeFrom = { runId: liveFrom.runId, journalPath: liveFrom.journalPath, scriptPath: liveFrom.scriptPath };
+    } else if (keyFrom?.ok) {
+      resumeFrom = { runId: keyFrom.runId, journalPath: keyFrom.journalPath, scriptPath: undefined };
+    }
+
+    // A resume with no source of its own re-runs what that run ran. The
+    // common case is an edited script, but "run that again, cheaply" should
+    // not require repeating a path the run already knows. Only a live resume
+    // knows one — a key resume must bring its own script.
+    const noSource = source.script === undefined && source.scriptPath === undefined && source.name === undefined;
+    const resolved = resolveWorkflowScript(
+      noSource && resumeFrom?.scriptPath !== undefined
+        ? { scriptPath: resumeFrom.scriptPath }
+        : source,
+      ctx.cwd,
+    );
+    if (!resolved.ok) return { ok: false, message: resolved.message };
+
+    // Parsed before anything is scheduled: a bad `meta` is an authoring error
+    // the caller can fix immediately, and reporting it as a background run
+    // that failed a second later would just cost a turn.
+    let meta: WorkflowMeta;
+    try {
+      meta = extractMeta(resolved.script).meta;
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+
+    // The cross-session resume key: the sha256 of this script plus these args.
+    // Uncomputable (non-JSON args) means no header rather than no run — the
+    // same-session resume never needed one.
+    let resumeKey: string | undefined;
+    try {
+      resumeKey = workflowResumeKey(resolved.script, opts.args);
+    } catch {
+      resumeKey = undefined;
+    }
+
+    const runId = workflowRunId();
+    // Every invocation lands on disk next to the agent transcripts, so
+    // iterating is edit-the-file-then-rerun-with-scriptPath rather than
+    // re-emitting the whole source. The journal sits beside it under the same
+    // id, which is what makes a run id enough to resume from. Its header line
+    // carries the resume key, which is what makes the same script plus args
+    // enough from any session.
+    let savedPath: string | undefined;
+    let journalPath: string | undefined;
+    try {
+      const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
+      savedPath = join(dir, `${runId}.workflow.js`);
+      writeFileSync(savedPath, resolved.script, "utf-8");
+      journalPath = join(dir, `${runId}.workflow.jsonl`);
+      if (resumeKey !== undefined) {
+        writeJournalHeader(journalPath, { resumeKey, runId, createdAt: Date.now() });
+      }
+    } catch (err) {
+      savedPath = undefined;
+      journalPath = undefined;
+      console.warn(`[pi-subagents] could not persist workflow script: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
+
+    const task = createWorkflowTask({
+      id: runId,
+      script: resolved.script,
+      scriptPath: resolved.scriptPath ?? savedPath,
+      args: opts.args,
+      meta,
+      ...(opts.toolCallId !== undefined ? { toolCallId: opts.toolCallId } : {}),
+      ...(journalPath !== undefined ? { journalPath } : {}),
+      ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
+    });
+    workflowTasks.set(runId, task);
+    // The run's own row has to appear now, not when it settles. Its agents
+    // are owned by it, so their lifecycle callbacks no longer refresh these
+    // surfaces — nothing else would register the widget for a run whose
+    // first agent has not started yet.
+    widget.update();
+    fleet.update();
+
+    // Background, like Claude Code: the id comes back now and the run keeps
+    // going without the caller.
+    void runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task));
+
+    const replayNote =
+      task.resumedFrom !== undefined
+        ? `Resuming ${task.resumedFrom}: ${task.replay?.length ?? 0} recorded call(s) available to replay.\n`
+        : opts.resumeFromRunId !== undefined || opts.resumeFromKey !== undefined
+          ? `Nothing to replay from ${opts.resumeFromRunId ?? opts.resumeFromKey} — every agent runs live.\n`
+          : "";
+    return { ok: true, task, meta, resumeKey, replayNote };
+  }
+
   // Defined unconditionally, registered only when the feature is on — the same
   // shape the Agent tool uses. Keeping the definition out of the `if` means the
   // switch changes exactly one thing: whether pi is ever told about the tool.
@@ -2446,6 +2565,13 @@ Terse command-style prompts produce shallow, generic work.
           pattern: "^wf_[a-z0-9-]{6,}$",
           description:
             "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args means nothing re-runs.",
+        }),
+      ),
+      resumeFromKey: Type.Optional(
+        Type.String({
+          pattern: "^[0-9a-f]{64}$",
+          description:
+            "Resume key of an earlier workflow, from any session. The same replay as resumeFromRunId, looked up by the sha256 of its script plus its args (reported as `Resume key` when the run started) instead of by run id. A run id wins when both are given.",
         }),
       ),
       // Accepted and ignored, as in Claude Code. Models reach for them because
@@ -2494,89 +2620,29 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
-      const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
-      if (resumeFrom !== undefined && !resumeFrom.ok) return textResult(resumeFrom.message);
-
-      // A resume with no source of its own re-runs what that run ran. The
-      // common case is an edited script, but "run that again, cheaply" should
-      // not require repeating a path the run already knows.
-      const resolved = resolveWorkflowScript(
-        params.script === undefined && params.scriptPath === undefined && params.name === undefined
-          && resumeFrom !== undefined
-          ? { scriptPath: resumeFrom.scriptPath }
-          : params,
-        ctx.cwd,
-      );
-      if (!resolved.ok) return textResult(resolved.message);
-
-      // Parsed before anything is scheduled: a bad `meta` is an authoring error
-      // the model can fix immediately, and reporting it as a background run
-      // that failed a second later would just cost a turn.
-      let meta: WorkflowMeta;
-      try {
-        meta = extractMeta(resolved.script).meta;
-      } catch (err) {
-        return textResult(err instanceof Error ? err.message : String(err));
-      }
-
-      const runId = workflowRunId();
-      // Every invocation lands on disk next to the agent transcripts, so
-      // iterating is edit-the-file-then-rerun-with-scriptPath rather than
-      // re-emitting the whole source. The journal sits beside it under the same
-      // id, which is what makes a run id enough to resume from.
-      let savedPath: string | undefined;
-      let journalPath: string | undefined;
-      try {
-        const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
-        savedPath = join(dir, `${runId}.workflow.js`);
-        writeFileSync(savedPath, resolved.script, "utf-8");
-        journalPath = join(dir, `${runId}.workflow.jsonl`);
-      } catch (err) {
-        savedPath = undefined;
-        journalPath = undefined;
-        console.warn(`[pi-subagents] could not persist workflow script: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
-
-      const task = createWorkflowTask({
-        id: runId,
-        script: resolved.script,
-        scriptPath: resolved.scriptPath ?? savedPath,
+      const launched = await launchWorkflowRun(params, {
         args: params.args,
-        meta,
+        resumeFromRunId: params.resumeFromRunId,
+        resumeFromKey: params.resumeFromKey,
         toolCallId,
-        ...(journalPath !== undefined ? { journalPath } : {}),
-        ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
-      });
-      workflowTasks.set(runId, task);
-      // The run's own row has to appear now, not when it settles. Its agents
-      // are owned by it, so their lifecycle callbacks no longer refresh these
-      // surfaces — nothing else would register the widget for a run whose
-      // first agent has not started yet.
-      widget.update();
-      fleet.update();
-
-      // Background, like Claude Code: the id comes back now and the run keeps
-      // going without the tool call.
-      void runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task));
-
+      }, ctx);
+      if (!launched.ok) return textResult(launched.message);
+      const { task, meta, resumeKey, replayNote } = launched;
       return {
         content: [{
           type: "text" as const,
           text:
             `Workflow "${meta.name}" started in the background.\n` +
-            `Task ID: ${runId}\n` +
+            `Task ID: ${task.id}\n` +
             (task.scriptPath ? `Script: ${task.scriptPath}\n` : "") +
-            (task.resumedFrom !== undefined
-              ? `Resuming ${task.resumedFrom}: ${task.replay?.length ?? 0} recorded call(s) available to replay.\n`
-              : params.resumeFromRunId !== undefined
-                ? `Nothing to replay from ${params.resumeFromRunId} — every agent runs live.\n`
-                : "") +
+            replayNote +
+            (resumeKey !== undefined
+              ? `Resume key: ${resumeKey} — same script plus args with resumeFromKey replays this run from any session.\n`
+              : "") +
             `\nYou will be notified when it finishes — do NOT poll or sleep waiting for it.\n` +
             `To iterate, edit the script file and call SubagentWorkflow again with scriptPath.`,
         }],
-        details: { taskId: runId },
+        details: { taskId: task.id },
       };
     },
   });
@@ -3999,9 +4065,74 @@ Write the file using the write tool. Only write the file, nothing else.`;
     ctx.ui.notify(message, level);
   }
 
+  /**
+   * One picker row for a saved workflow: name, description, winning source
+   * dir, and whether it reads `args`. The source is shortened when it is one
+   * of the project roots, since those read the same from any project.
+   */
+  function shortWorkflowSource(cwd: string, sourceDir: string): string {
+    if (sourceDir === join(cwd, ".pi", "workflows")) return ".pi/workflows";
+    if (sourceDir === join(cwd, ".agents", "workflows")) return ".agents/workflows";
+    return sourceDir;
+  }
+
+  /** `/workflows` — pick a saved workflow and run it with JSON args. */
+  async function showWorkflowsCommand(ctx: ExtensionCommandContext) {
+    if (!isWorkflowsEnabled()) {
+      ctx.ui.notify(
+        "Workflows are off. Turn them on in /agents → Settings → Workflows, " +
+          '`or set `"workflowsEnabled": true` in .pi/subagents.json.',
+        "warning",
+      );
+      return;
+    }
+    const details = listSavedWorkflowDetails(ctx.cwd);
+    if (details.length === 0) {
+      ctx.ui.notify(
+        "No saved workflows. Save one as `<name>.js` in `.pi/workflows/`, `.agents/workflows/`, or `<agent-dir>/workflows/`.",
+        "info",
+      );
+      return;
+    }
+    const picked = await selectItem(
+      ctx.ui,
+      "Workflows",
+      details,
+      (detail: SavedWorkflowDetail) =>
+        `${detail.name} — ${detail.description} · ${shortWorkflowSource(ctx.cwd, detail.sourceDir)} · ${detail.takesArgs ? "takes args" : "no args"}`,
+    );
+    if (picked === undefined) return;
+    const argsText = (await ctx.ui.input("Args as JSON (empty for none)"))?.trim() ?? "";
+    let args: unknown;
+    if (argsText !== "") {
+      try {
+        args = JSON.parse(argsText);
+      } catch {
+        ctx.ui.notify(`Args are not valid JSON: ${argsText.slice(0, 200)}`, "warning");
+        return;
+      }
+    }
+    // Same `args` semantics as SubagentWorkflow({ name, args }): verbatim.
+    const launched = await launchWorkflowRun({ name: picked.name }, { args }, ctx);
+    if (!launched.ok) {
+      ctx.ui.notify(launched.message, "warning");
+      return;
+    }
+    ctx.ui.notify(
+      `Workflow "${launched.meta.name}" started in the background. Task ID: ${launched.task.id}.` +
+        (launched.task.scriptPath ? ` Script: ${launched.task.scriptPath}` : ""),
+      "info",
+    );
+  }
+
   pi.registerCommand("agents", {
     description: "Manage agents",
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+  });
+
+  pi.registerCommand("workflows", {
+    description: "Run a saved workflow",
+    handler: async (_args, ctx) => { await showWorkflowsCommand(ctx); },
   });
 
   /**
