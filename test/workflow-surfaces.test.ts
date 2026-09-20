@@ -224,6 +224,17 @@ describe("/workflows", () => {
       expect(note).not.toContain("<journal>");
       expect(note).toContain("<result>short</result>");
     });
+    it("states failures in the summary instead of leaving them to the denominator", () => {
+      const task = createWorkflowTask({ id: "wf_failed", script: "return 1;" });
+      task.status = "completed";
+      task.value = "done";
+      task.workflowProgress = [
+        { type: "workflow_agent", index: 0, label: "a", state: "done" },
+        { type: "workflow_agent", index: 1, label: "b", state: "error" },
+      ];
+
+      expect(formatWorkflowNotification(task)).toContain("1/2 agents, 1 failed");
+    });
   });
 
   it("refuses when workflows are off, without offering a picker", async () => {

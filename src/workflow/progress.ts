@@ -405,7 +405,9 @@ export interface WorkflowHeader {
 
 /**
  * The one-line summary above the tree: `3/7 agents · 1m12s`, plus a terminal
- * suffix once the run stops. Deliberately carries no phase count.
+ * suffix once the run stops and a `· N failed` segment while failures stand —
+ * the denominator is planned agents, so the count states failures outright
+ * rather than leaving them to be inferred.
  */
 export function header(
   task: {
@@ -431,16 +433,20 @@ export function header(
 
   let doneAgents = 0;
   let totalAgents = 0;
+  let failedAgents = 0;
   for (const group of groups) {
     doneAgents += group.doneCount;
     totalAgents += group.totalCount;
+    for (const agent of group.agents) {
+      if (agent.state === "error") failedAgents++;
+    }
   }
   totalAgents = Math.max(agentCount, totalAgents, doneAgents);
 
   return {
     name: task.workflowName ?? meta?.name ?? task.summary ?? task.description ?? "workflow",
     subtext: meta?.description ?? task.description ?? task.summary ?? "",
-    stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")} · ${formatDuration(elapsedMs(task, now))}${suffix}`,
+    stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")}${failedAgents > 0 ? ` · ${failedAgents} failed` : ""} · ${formatDuration(elapsedMs(task, now))}${suffix}`,
   };
 }
 
