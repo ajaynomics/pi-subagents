@@ -18,7 +18,7 @@ Use the `Agent` tool for one delegated task, or a handful you can name up front.
 
 ### 1. Ask for one
 
-There is no `/workflows` command. The tool is model-invoked, so you get a workflow by asking for one in the prompt — the same way you ask for anything else. What you say shapes what you get:
+No command invents a workflow for you: an ad-hoc run is model-invoked, so you get one by asking in the prompt — the same way you ask for anything else. (To re-run a workflow you already saved, use `/workflows`.) What you say shapes what you get:
 
 | What you say | What you get |
 |---|---|
