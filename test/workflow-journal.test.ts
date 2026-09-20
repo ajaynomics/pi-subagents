@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { appendJournal, journalKey, readJournal, readJournalHeader, writeJournalHeader, type WorkflowJournalEntry } from "../src/workflow/journal.js";
+import { appendJournal, journalKey, readJournal, readJournalHeader, type WorkflowJournalEntry, writeJournalHeader } from "../src/workflow/journal.js";
 import { runWorkflow, type WorkflowSpawnRequest, type WorkflowSpawnResult } from "../src/workflow/runtime.js";
 
 const HEAD = 'export const meta = { name: "probe", description: "a probe" };\n';
