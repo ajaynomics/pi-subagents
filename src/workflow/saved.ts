@@ -287,8 +287,10 @@ export function listSavedWorkflowDetails(cwd: string): SavedWorkflowDetail[] {
  * The run's meta name, reduced to the whitelist saved names resolve through
  * (a single trailing `.js` is stripped, so `foo.js` saves as `foo.js` rather
  * than `foo.js.js`); anything without a usable name falls back to the run id,
- * which always passes. The saved file stays byte-identical to the run's
- * script, so it re-runs via `{ name }` or `scriptPath` unchanged.
+ * which always passes. The strip is case-sensitive on purpose: `{ name }`
+ * resolves filenames exactly, so only a literal `.js` round-trips — `Foo.JS`
+ * keeps its suffix and still resolves. The saved file stays byte-identical to
+ * the run's script, so it re-runs via `{ name }` or `scriptPath` unchanged.
  */
 export function sanitizeWorkflowSaveName(metaName: string | undefined, runId: string): string {
   const slug = (metaName ?? "")

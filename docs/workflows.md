@@ -122,7 +122,7 @@ A run id dies with its session; the resume key does not. Every journal's first l
 SubagentWorkflow({ script, args, resumeFromKey: "<64 hex>" })
 ```
 
-The lookup scans every session directory for the project and replays the most complete journal with that key — most recorded calls wins, newest breaks ties; changed args are a different key and replay nothing. Precedence is explicit: a live run id wins, so when `resumeFromRunId` is given the key is ignored (a malformed key still errors), and same-session behavior is otherwise unchanged — unknown ids still error, live runs still refuse, failures still never replay, and a journal from before headers existed simply has no key.
+The lookup scans every session directory for the project and replays the most complete journal with that key — most successful (ok) calls wins, newest breaks ties; changed args are a different key and replay nothing. Precedence is explicit: a live run id wins, so when `resumeFromRunId` is given the key is ignored (a malformed key still errors), and same-session behavior is otherwise unchanged — unknown ids still error, live runs still refuse, failures still never replay, and a journal from before headers existed simply has no key.
 
 ### 5. Save it
 
@@ -319,7 +319,7 @@ The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only
 
 `/workflows` lists every saved workflow — name, description, winning source dir (project shadows global) and whether it reads `args` — and launches the pick with JSON args you type at the prompt. Args pass through verbatim, exactly as `SubagentWorkflow({ name, args })`. With nothing saved it says where to put one; with workflows off it refuses and points at the setting.
 
-From the run inspector, `s` at the overview saves the viewed run's script to `.pi/workflows/<name>.js` — the meta name sanitized to a filename, the run id when the meta has none usable. The file is byte-identical to the run's script and re-runs via `{ name }`; an identical file is overwritten without asking (the inspector is also driven headless), and the confirmation line says so — a different file under the same name is left alone and the save goes to `<name>-2.js` instead. In the agent detail `s` keeps skipping the selected agent.
+From the run inspector, `s` at the overview saves the viewed run's script to `.pi/workflows/<name>.js` — the meta name sanitized to a filename, the run id when the meta has none usable. The file is byte-identical to the run's script and re-runs via `{ name }`; an identical file is overwritten without asking (the inspector is also driven headless), and the confirmation line says so — a different file under the same name is left alone and the save goes to `<name>-2.js` instead. A symlinked `.pi/workflows` root is refused outright, as is an unreadable file. In the agent detail `s` keeps skipping the selected agent.
 
 ### Limits and caps
 
