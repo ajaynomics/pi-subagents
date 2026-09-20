@@ -68,6 +68,8 @@ A **card in the transcript**, updating as the run goes:
   ⎿  auditing 6 route files
 ```
 
+While failures stand, the header states them outright (`3/7 agents · 1 failed · 1m12s`) — the denominator is planned agents, never a failure count.
+
 A **`workflow` row in FleetView**, above the agents, carrying its agent counts where a description would go. `⏎` on it opens the inspector rather than a conversation overlay.
 
 Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.

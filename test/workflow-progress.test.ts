@@ -361,6 +361,15 @@ describe("header", () => {
     expect(line.subtext).toBe("review the diff");
   });
 
+  it("states failures outright instead of leaving them to the denominator", () => {
+    const groups = buildPhaseGroups([
+      agentEntry({ index: 0, state: "done" }),
+      agentEntry({ index: 1, state: "error" }),
+      agentEntry({ index: 2, state: "progress" }),
+    ]);
+    expect(header(task, meta, groups, 3, 73_000).stats).toBe("1/3 agents · 1 failed · 1m12s");
+  });
+
   it("singularizes a lone agent", () => {
     const groups = buildPhaseGroups([agentEntry({ index: 0, state: "done" })]);
     expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent · 1s");
