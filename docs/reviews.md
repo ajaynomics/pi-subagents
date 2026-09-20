@@ -202,3 +202,13 @@ Sandi verdict **no blockers** (3 suggestions, all fixed). Post-hoc independent r
 My verification: diff read; fixture test 23/23 green; `npm run check` 109 files, 2248 passed / 7 skipped.
 Probes, each red then restored (7): P1 journal ok→false → counts red; P2 forged stdout Task ID → stdout red; P3 split to 1 subtask → branch red; P4 global GC rename → linkage red (single-file rename insufficient — the token occurs 4× with 2 sharing a line); P5 dropped usage line → aggregated red; S 9th GC token in journal+transcript → only the size assertion red (linkage held); U duplicated usage line → only the aggregated test red. All restores byte-verified against backups; 23 green after each restore.
 Machine outputs: `npx vitest run test/workflow-live-proof.test.ts` → 23 passed (23). `npm run check` → Test Files 109 passed (109) / Tests 2248 passed | 7 skipped (2255).
+
+## Post-hoc independent review — leftover hardening (criterion: independent eyes)
+
+Sandi verdict **ship** (no blockers; docs-only + test-pinning, no source changes). Reviewed `3ca591e..HEAD` (stale-doc reword, kill-offset property, garbage/torn ranking, verbatim-args cases, CHANGELOG bullets):
+1. Kill-offset property loop correctly oracles the split-on-newline readers (complete-without-newline boundaries); torn-header and header-only cases match decline/accept.
+2. Garbage + torn-ranking pins verified against the scan; `utimesSync` (plural) confirmed as the real `node:fs` API and the correct deterministic-ordering fix for recency-tie false-passes.
+3. Nit (verified non-issue, no change): claimed 4sp over-indent — the block indents `it` at 4sp throughout and biome is green.
+Not covered (accepted with reasoning): multi-byte split mid-codepoint — fixtures are ASCII and utf-8 decode never throws (replacement char parses as skippable), so the property holds by construction.
+My verification: diff read; `npm run check` green (2255 passed | 7 skipped).
+Probes, each red then restored: K1 (push non-entries), K2 (header marker never matches); G1 (drop resume-key check — rerun deterministic after `utimesSync` ordering), G2 (complete torn partial into a 2nd ok entry); V1 (wrap parsed args), V2 (dangling catch transform error). The kill property also caught an off-by-one in my own test math (complete-without-newline), fixed before commit.
