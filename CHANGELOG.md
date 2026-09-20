@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Kill-torn journal reads are pinned at every byte offset.** `readJournal`/`readJournalHeader` already declined torn writes; `workflow-journal.test.ts` now proves it for a kill at any byte offset, plus torn-header and header-only shapes. No behavior change.
 - **Session-dir scans ignore garbage files and count only complete entries.** `findJournalByResumeKey` already skipped foreign files, keyless journals, unreadable paths and torn lines; `workflow-surfaces.test.ts` now pins it with garbage-shape fixtures plus a torn-candidate ranking case. No behavior change.
 - **`/workflows` args edge cases are pinned end-to-end.** Nested objects, arrays, unicode, empty and absent args reach the launched script verbatim, and invalid JSON is refused without launching. No behavior change.
+- **Completion notices name the run's journal file.** A truncated `<result>` kept its marker but gave no path to the full text; the notice now carries a `<journal>` line (omitted when the run journaled nowhere) so a 48KB synth output is one file read away. No other notice shape changed.
 
 ## [0.19.0] - 2026-08-25
 

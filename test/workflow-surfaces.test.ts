@@ -40,7 +40,7 @@ import {
 import type { WorkflowAgentEntry, WorkflowEntry } from "../src/workflow/progress.js";
 import { runWorkflow, type WorkflowHost, type WorkflowSpawnRequest } from "../src/workflow/runtime.js";
 import { sanitizeWorkflowSaveName } from "../src/workflow/saved.js";
-import { createWorkflowTask, resolveKeyResumeTarget, updateWorkflowProgressBatch } from "../src/workflow/task.js";
+import { createWorkflowTask, formatWorkflowNotification, resolveKeyResumeTarget, updateWorkflowProgressBatch } from "../src/workflow/task.js";
 import { ctx, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 /* ------------------------------------------------------------------------- *
@@ -201,6 +201,30 @@ describe("/workflows", () => {
       expect(ui.notes.some(note => note.text.includes("not valid JSON"))).toBe(true);
       expect(ui.notes.some(note => note.text.includes("started in the background"))).toBe(false);
     });
+
+  describe("workflow completion notification", () => {
+    function finishedTask(value: unknown, journalPath?: string) {
+      const task = createWorkflowTask({ id: "wf_note", script: "return 1;" });
+      task.status = "completed";
+      task.value = value;
+      if (journalPath !== undefined) task.journalPath = journalPath;
+      return task;
+    }
+
+    it("names the journal file alongside a truncated result", () => {
+      const note = formatWorkflowNotification(finishedTask("x".repeat(5000), "/tmp/j/run.workflow.jsonl"));
+
+      expect(note).toContain("...(truncated)");
+      expect(note).toContain("<journal>/tmp/j/run.workflow.jsonl</journal>");
+    });
+
+    it("omits the journal line when the run journaled nowhere", () => {
+      const note = formatWorkflowNotification(finishedTask("short"));
+
+      expect(note).not.toContain("<journal>");
+      expect(note).toContain("<result>short</result>");
+    });
+  });
 
   it("refuses when workflows are off, without offering a picker", async () => {
     hermetic.restore();
