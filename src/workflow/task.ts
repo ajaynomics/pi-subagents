@@ -16,7 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import { escapeXml } from "../xml.js";
-import type { WorkflowJournalEntry } from "./journal.js";
+import { findJournalByResumeKey, readJournalHeader, type WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
 import { collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
 import type { WorkflowControl, WorkflowRunResult } from "./runtime.js";
@@ -276,6 +276,48 @@ export function resolveResumeTarget(
     // no file of its own.
     scriptPath: prior.scriptPath ?? "",
   };
+}
+
+/**
+ * Resolve a `resumeFromKey` against journals on disk, across sessions.
+ *
+ * The key is the run's resume key — the sha256 of its script plus its args —
+ * so unlike a run id it survives a new session: the lookup scans every session
+ * directory for this project and replays the newest match. A live run id always
+ * wins (the caller tries {@link resolveResumeTarget} first); this only runs
+ * when no id was given. An unknown or malformed key is an error rather than a
+ * cold start, for the same reason an unknown id is.
+ */
+export function resolveKeyResumeTarget(
+  key: string | undefined,
+  cwd: string,
+):
+  | undefined
+  | { ok: true; runId: string; journalPath: string }
+  | { ok: false; message: string } {
+  const trimmed = key?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  if (!/^[0-9a-f]{64}$/.test(trimmed)) {
+    return {
+      ok: false,
+      message:
+        `No workflow journal for resume key "${trimmed}". ` +
+        "The key is the run's 64-character resume key (sha256 of its script plus its args), " +
+        "reported when the run started — pass it as `resumeFromKey` with identical script and args.",
+    };
+  }
+  const journalPath = findJournalByResumeKey(cwd, trimmed);
+  if (journalPath === undefined) {
+    return {
+      ok: false,
+      message:
+        `No workflow journal for resume key "${trimmed}". ` +
+        "Nothing with that script plus args has journaled for this project yet — " +
+        "call this without `resumeFromKey`.",
+    };
+  }
+  const runId = readJournalHeader(journalPath)?.runId ?? trimmed;
+  return { ok: true, runId, journalPath };
 }
 
 /** `<task-notification>`, in the same shape a finished background agent sends. */

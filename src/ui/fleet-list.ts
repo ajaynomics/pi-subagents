@@ -16,6 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import type { WorkflowTask } from "../workflow/task.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
@@ -62,6 +63,28 @@ export interface FleetWorkflow {
   /** Set once the run settles, which is what freezes its clock. */
   completedAt?: number;
   tokens: number;
+}
+
+/**
+ * A run as a row of this list.
+ *
+ * Every collapsed agent counts, nested rows (entries with `parentIndex`)
+ * included — they are the run's work whatever depth they sit at. Cached
+ * counters only, no log walk: the list calls this on a 200ms tick and reads
+ * the roster several times per update, so deriving here would put O(log) work
+ * in the render loop.
+ */
+export function taskToFleetWorkflow(task: WorkflowTask): FleetWorkflow {
+  return {
+    id: task.id,
+    name: task.meta?.name ?? task.workflowName ?? task.id,
+    status: task.status,
+    doneCount: task.doneCount,
+    totalCount: task.agentCount,
+    startedAt: task.startTime,
+    ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
+    tokens: task.totalTokens,
+  };
 }
 
 type MainEntry = { kind: "main" };

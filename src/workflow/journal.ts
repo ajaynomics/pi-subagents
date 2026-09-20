@@ -66,11 +66,25 @@
  * ## What the file is
  *
  * The file is JSON Lines, appended as each agent settles, so a run that is
- * killed mid-flight still leaves everything it had finished.
+ * killed mid-flight still leaves everything it had finished. The first line
+ * may instead be a header carrying the run's resume key (see
+ * {@link workflowResumeKey}) — it is not an agent entry, so a reader that
+ * only accepts entries skips it untouched.
+ *
+ * ## Cross-session resume
+ *
+ * A run id only resolves inside the session that ran it, and journals live
+ * under a per-session directory. A new session finds an old journal by the
+ * resume key instead: the sha256 of the script plus its args, stored in the
+ * header and matched by {@link findJournalByResumeKey} across every session
+ * directory for the project. Newest match wins.
  */
 
 import { createHash } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { encodeCwd } from "../output-file.js";
 
 /** One settled agent call, as replayed. */
 export interface WorkflowJournalEntry {
@@ -205,4 +219,133 @@ function isEntry(value: unknown): value is WorkflowJournalEntry {
     (entry.text === undefined || typeof entry.text === "string") &&
     (entry.resumed === undefined || entry.resumed === true)
   );
+}
+
+/**
+ * Key that identifies a whole run's journal across sessions.
+ *
+ * `sha256(JSON.stringify([script, argsJson]))` as 64 lowercase hex chars,
+ * where `argsJson` is `"null"` for no args and `JSON.stringify(args)`
+ * otherwise. JSON key order matters: the same args in a different key order
+ * are a different key, and so replay nothing. Throws when `args` are not
+ * JSON-serializable — callers that cannot key a run skip the header and keep
+ * the same-session resume they already had.
+ */
+export function workflowResumeKey(script: string, args: unknown): string {
+  const argsJson: string | undefined = args === undefined ? "null" : JSON.stringify(args);
+  if (argsJson === undefined) {
+    throw new Error("workflowResumeKey: args are not JSON-serializable, so the run cannot be keyed for cross-session resume.");
+  }
+  return createHash("sha256").update(JSON.stringify([script, argsJson])).digest("hex");
+}
+
+/** First line of a journal file, when the run recorded one. */
+export interface WorkflowJournalHeader {
+  /** {@link workflowResumeKey} of the run that wrote the file. */
+  resumeKey: string;
+  /** The run id that wrote it, for the result line that says what replayed. */
+  runId: string;
+  /** `Date.now()` when the run started. Informational. */
+  createdAt: number;
+}
+
+/** Marker field a header line carries; agent entries never have it. */
+const JOURNAL_HEADER_MARKER = "workflowJournalHeader";
+
+/** Write the header line. Best-effort like every other journal write. */
+export function writeJournalHeader(path: string, header: WorkflowJournalHeader): void {
+  try {
+    appendFileSync(path, `${JSON.stringify({ [JOURNAL_HEADER_MARKER]: 1, ...header })}\n`, "utf-8");
+  } catch {
+    // Same trade as appendJournal: no header costs a cross-session resume.
+  }
+}
+
+/**
+ * Read the header line back. Never throws: a journal from before headers
+ * existed, or one whose first line is an agent entry, simply has none.
+ */
+export function readJournalHeader(path: string): WorkflowJournalHeader | undefined {
+  let first: string | undefined;
+  try {
+    const raw = readFileSync(path, "utf-8");
+    for (const line of raw.split("\n")) {
+      if (line.trim() === "") continue;
+      first = line;
+      break;
+    }
+  } catch {
+    return undefined;
+  }
+  if (first === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(first);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (record[JOURNAL_HEADER_MARKER] !== 1) return undefined;
+    if (typeof record.resumeKey !== "string" || typeof record.runId !== "string") return undefined;
+    if (!/^[0-9a-f]{64}$/.test(record.resumeKey)) return undefined;
+    return {
+      resumeKey: record.resumeKey,
+      runId: record.runId,
+      createdAt: typeof record.createdAt === "number" ? record.createdAt : 0,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Find a journal written for `resumeKey` under the same project.
+ *
+ * Journals live at `<tmp>/pi-subagents-<uid>/<encoded-cwd>/<session>/tasks/,
+ * so a new session is a new directory: the scan covers every session directory
+ * for this cwd and returns the match with the most journaled agent calls
+ * (file mtime breaks ties), which is the most complete run of that script
+ * plus args. Never throws: nothing found is undefined.
+ */
+export function findJournalByResumeKey(cwd: string, resumeKey: string): string | undefined {
+  let base: string;
+  try {
+    base = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encodeCwd(cwd));
+  } catch {
+    return undefined;
+  }
+  let sessions: string[];
+  try {
+    sessions = readdirSync(base);
+  } catch {
+    return undefined;
+  }
+  let best: string | undefined;
+  let bestCount = -1;
+  let bestMtime = -1;
+  for (const session of sessions) {
+    const dir = join(base, session, "tasks");
+    let files: string[];
+    try {
+      files = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (!file.endsWith(".workflow.jsonl")) continue;
+      const path = join(dir, file);
+      const header = readJournalHeader(path);
+      if (header?.resumeKey !== resumeKey) continue;
+      const count = readJournal(path).length;
+      let mtime = 0;
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (count > bestCount || (count === bestCount && mtime > bestMtime)) {
+        bestCount = count;
+        bestMtime = mtime;
+        best = path;
+      }
+    }
+  }
+  return best;
 }
