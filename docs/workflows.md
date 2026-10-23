@@ -318,7 +318,7 @@ A run's concurrency limit is its own, independent of the session's `maxConcurren
 
 `pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
 
-Completion delivery after a session replacement or reload is best-effort: stale session APIs produce a warning, not an unhandled rejection.
+Print and JSON modes await the workflow before the model's one turn; interactive and RPC modes detach it so startup remains responsive. Completion delivery after a session replacement or reload is best-effort: stale session APIs produce a warning, not an unhandled rejection.
 
 ## Recipes
 

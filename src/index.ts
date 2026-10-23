@@ -897,9 +897,10 @@ export default function (pi: ExtensionAPI) {
     }
     // Last, and only here: CLI flag values are applied by the host AFTER every
     // extension factory has run, so this is the earliest point the real value
-    // exists. Detached inside — a workflow must not hold up session startup.
+    // exists. TUI and RPC stay detached; one-shot modes await completion before
+    // startup returns so process teardown cannot race the workflow.
     resolveWorkflowCollisions(ctx);
-    runWorkflowFlag(ctx);
+    await runWorkflowFlag(ctx);
   });
 
   /** Agent types `@` can start, in the shape the roster wants. */
@@ -2573,8 +2574,8 @@ Terse command-style prompts produce shallow, generic work.
   /**
    * Run a task to completion against the real manager, settling the record
    * either way. Never rejects: a run that cannot start (bad `meta`, oversized
-   * source, non-JSON `args`) is a failed workflow, and both callers here are
-   * detached — a rejection would surface as an unhandled one.
+   * source, non-JSON `args`) is a failed workflow. Callers may detach this
+   * promise, so a rejection would surface as an unhandled one.
    */
   async function runWorkflowTask(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
     try {
@@ -2889,7 +2890,7 @@ Terse command-style prompts produce shallow, generic work.
    * session_start for exactly this reason.
    */
   let workflowFlagHandled = false;
-  function runWorkflowFlag(ctx: ExtensionContext): void {
+  async function runWorkflowFlag(ctx: ExtensionContext): Promise<void> {
     if (workflowFlagHandled) return;
     const flag = pi.getFlag(WORKFLOW_FILE_FLAG);
     if (flag === undefined || flag === false) return;
@@ -2942,9 +2943,9 @@ Terse command-style prompts produce shallow, generic work.
     fleet.update();
     report(`Running workflow ${meta.name}…`, "info");
 
-    // Detached: session_start is awaited by the host, and a workflow can run for
-    // minutes — blocking here would hold the whole session's startup.
-    void runWorkflowTask(ctx, task).then(() => {
+    // TUI and RPC must not block startup. Print/JSON are one-shot: detaching
+    // there races process teardown, so await both completion and delivery.
+    const settled = runWorkflowTask(ctx, task).then(() => {
       // No tool call to attach a card to: persist an entry and hand the result
       // to the model as next-turn context, without forcing another turn.
       try {
@@ -2968,6 +2969,7 @@ Terse command-style prompts produce shallow, generic work.
         fleet.update();
       } catch { /* ignore a repaint through a replaced session's UI */ }
     });
+    if (ctx.mode === "print" || ctx.mode === "json") await settled;
   }
 
   // ---- get_subagent_result tool ----
