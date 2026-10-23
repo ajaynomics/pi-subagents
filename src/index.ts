@@ -2945,17 +2945,28 @@ Terse command-style prompts produce shallow, generic work.
     // Detached: session_start is awaited by the host, and a workflow can run for
     // minutes — blocking here would hold the whole session's startup.
     void runWorkflowTask(ctx, task).then(() => {
-      // No tool call to attach a result card to, so the card becomes a session
-      // entry (same layout), and the outcome is handed to the model as context
-      // for its next turn rather than forcing one.
-      pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
-      pi.sendMessage({
-        customType: "workflow-result",
-        content: formatWorkflowNotification(task),
-        display: false,
-      }, { deliverAs: "nextTurn" });
-      widget.update();
-      fleet.update();
+      // No tool call to attach a card to: persist an entry and hand the result
+      // to the model as next-turn context, without forcing another turn.
+      try {
+        pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
+        pi.sendMessage({
+          customType: "workflow-result",
+          content: formatWorkflowNotification(task),
+          display: false,
+        }, { deliverAs: "nextTurn" });
+      } catch (err) {
+        // Session replacement/reload invalidates the captured pi and ctx.ui.
+        // Do not report through that UI from here; the settled task stays in
+        // workflowTasks even if best-effort delivery cannot reach the session.
+        console.warn(
+          `[pi-subagents] Workflow ${meta.name} finished but its result could not be delivered ` +
+            `to the session: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        widget.update();
+        fleet.update();
+      } catch { /* ignore a repaint through a replaced session's UI */ }
     });
   }
 
