@@ -2221,6 +2221,13 @@ Terse command-style prompts produce shallow, generic work.
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
+        // Foreground resume does not invoke onComplete. Retain THIS outcome,
+        // not the earlier run's snapshot, for retrieval after registry cleanup.
+        pi.appendEntry("subagents:record", {
+          id: record.id, type: record.type, description: record.description,
+          status: record.status, result: record.result, error: record.error,
+          startedAt: record.startedAt, completedAt: record.completedAt,
+        });
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
@@ -2995,8 +3002,41 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
+      if (!record) {
+        // Read only this parent branch's completion snapshots, by exact ID.
+        // No child session, handle tombstone, filesystem scan or resurrection.
+        const branch = ctx.sessionManager.getBranch();
+        for (let i = branch.length - 1; i >= 0; i--) {
+          const entry = branch[i];
+          if (entry.type !== "custom" || entry.customType !== "subagents:record") continue;
+          const data = entry.data;
+          if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+          const snapshot = data as Partial<Pick<AgentRecord, "id" | "type" | "description" | "status" | "result" | "error" | "startedAt" | "completedAt">>;
+          if (snapshot.id !== params.agent_id
+            || typeof snapshot.type !== "string" || typeof snapshot.description !== "string"
+            || !["completed", "error", "stopped", "aborted", "steered"].includes(snapshot.status ?? "")
+            || typeof snapshot.startedAt !== "number" || !Number.isFinite(snapshot.startedAt)
+            || typeof snapshot.completedAt !== "number" || !Number.isFinite(snapshot.completedAt)
+            || (snapshot.result !== undefined && typeof snapshot.result !== "string")
+            || (snapshot.error !== undefined && typeof snapshot.error !== "string")) continue;
+
+          outbox.cancel(snapshot.id);
+          let output =
+            `Agent: ${snapshot.id}\nRetained terminal result (persisted in the current session branch)\n` +
+            `Type: ${getDisplayName(snapshot.type)} | Status: ${snapshot.status}${getStatusNote(snapshot.status!)} | Duration: ${formatDuration(snapshot.startedAt, snapshot.completedAt)}\n` +
+            `Description: ${snapshot.description}\n\n`;
+          if (snapshot.status === "error") {
+            const partial = snapshot.result?.trim();
+            output += `Error: ${snapshot.error}` + (partial ? `\n\nPartial output before the failure:\n${partial}` : "");
+          } else {
+            output += snapshot.result?.trim() || "No output.";
+          }
+          if (params.verbose) output += "\n\nLive conversation is unavailable after cleanup; only the retained terminal result is available.";
+          return textResult(output);
+        }
+      }
       if (!record || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }

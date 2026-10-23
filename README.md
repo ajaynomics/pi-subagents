@@ -541,6 +541,8 @@ Check status and retrieve results from a background agent.
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
 
+After an in-memory record is evicted, an exact agent ID can still retrieve its terminal result from the current parent session branch. This does not reopen or resume the child, scan other sessions, or restore a verbose conversation log. Handles need a live record for this tool; use the exact ID for a retained result.
+
 ### `steer_subagent`
 
 Send a steering message to a running agent. The message interrupts after the current tool execution.
